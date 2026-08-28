@@ -1,8 +1,8 @@
 -- Deals daily evolution — STX (Seedtag delivery) + BFM (Beachfront), all in USD.
 -- STX source amounts are EUR and are converted with the monthly average rate
 -- (analytics.currency_rates_monthly: rate_euros = EUR per 1 USD → divide).
--- Window: full history (no date filter; only today is excluded so the last
--- day is always closed).
+-- Window: last 90 closed days (today excluded) — capped so the embedded
+-- dashboard stays a shareable size.
 WITH sf AS (
   SELECT
     deal_id,
@@ -46,7 +46,8 @@ dcm AS (
     , sum(ssp_hb_inserts) as hb_inserts
     , sum(impressions) as impressions
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour < current_date  -- exclude today (partial day)
+  WHERE date_hour >= current_date - interval '90' day
+    AND date_hour < current_date  -- closed days only
     AND deal_name IS NOT NULL
   GROUP BY 1, 2, 3
 ),
@@ -64,7 +65,8 @@ del AS (
     sum(curator_margin_eur) as curator_margin_total_eur,
     sum(publisher_cost_eur) as pub_cost_eur
   FROM big_query_bdb.business.daily_curation_delivery_utc
-  WHERE dt < current_date  -- exclude today (partial day)
+  WHERE dt >= current_date - interval '90' day
+    AND dt < current_date  -- closed days only
   GROUP BY 1, 2, 3, 4
 )
 
@@ -184,7 +186,8 @@ del AS (
     , cast(null as bigint) as sf_product_lines
   from st_datalakehouse.analytics.reporting_bfm_demand
   where business_line in ('Select - BFM','DSP Marketplace - BFM')
-    and date < current_date  -- exclude today (partial day)
+    and date >= current_date - interval '90' day
+    and date < current_date  -- closed days only
   group by date, business_line, deal_id, ad_name, clearvu_account, advertiser, seat_id
 )
 

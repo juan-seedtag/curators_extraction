@@ -1,7 +1,7 @@
 """Deals Daily Dashboard generator — fully self-contained HTML (no server).
 
 Single dataset (sql/deals_daily.sql): STX (Seedtag delivery, EUR) + BFM
-(Beachfront) at deal-day grain, full history (today excluded), all amounts in
+(Beachfront) at deal-day grain, last 90 closed days, all amounts in
 USD (STX converted from EUR with monthly average rates).
 
 UI (approved mockup): KPI strip → cascading filters (curator first) →
