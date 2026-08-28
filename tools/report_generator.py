@@ -1,7 +1,7 @@
 """Deals Daily Dashboard generator — fully self-contained HTML (no server).
 
 Single dataset (sql/deals_daily.sql): STX (Seedtag delivery, EUR) + BFM
-(Beachfront, USD) at deal-day grain, last 7 closed days.
+(Beachfront, USD) at deal-day grain, full history (today excluded).
 
 UI (approved mockup): KPI strip → cascading filters (curator first) →
 daily-evolution SVG chart (bar/line, color by origin or business line) →
@@ -226,7 +226,7 @@ footer.report-footer svg{opacity:.75}
 
 <div class="note-banner">💶/💵 <strong>Currency caveat:</strong> STX amounts are <strong>EUR</strong>, BFM amounts are <strong>USD</strong> — totals and KPIs mix both currencies.
 &nbsp;·&nbsp; Funnel metrics naming differs between SSP (STX) and Beachfront (BFM) — see the <span class="info-icon" style="vertical-align:-4px" onclick="toggleTooltip(event,'funnel-tip')">i</span> tooltip.
-&nbsp;·&nbsp; curator_margin split is a hardcoded 0.30 placeholder (real source column pending).
+&nbsp;·&nbsp; curator margin split comes from Salesforce (curator_margin_value); deals without a Salesforce record keep their full margin on the Seedtag side.
 <div class="tooltip" id="funnel-tip">Beachfront uses a different funnel naming convention (Swap, Dec-2025):
 
 • bids = outgoing_bids (input bids): bids the DSP sends to the SSP. Top of the demand funnel.
@@ -251,7 +251,7 @@ Internal win rate = ads_served / total_bids_placed; external = impressions / ads
 
 <div class="card">
   <div class="card-header">📈 Daily revenue evolution
-    <span class="muted" style="font-weight:400">— gross revenue by day (last 7 closed days) · respects the filters above</span>
+    <span class="muted" style="font-weight:400">— gross revenue by day · respects the filters above</span>
     <div class="spacer"></div>
     <span class="flabel">Chart</span>
     <button class="seg-btn active" id="ct-bar" onclick="setChartType('bar')">Bars</button>
@@ -281,7 +281,7 @@ Internal win rate = ads_served / total_bids_placed; external = impressions / ads
       <div class="flabel" style="margin-bottom:8px">Metrics (SUM-aggregated)
         <span class="info-icon" style="vertical-align:-4px;margin-left:4px" onclick="toggleTooltip(event,'metric-tip')">i</span>
         <div class="tooltip" id="metric-tip">requests / bids / wins: for BFM rows these come from Beachfront's own funnel (ads_served / outgoing_bids / total_bids_placed) and are not 1:1 comparable with the STX SSP metrics.
-curator_margin_*: STX only (NULL for BFM); the 30/70 split is a placeholder. sf_product_lines: from Salesforce, STX only.</div>
+curator_margin_*: STX only (NULL for BFM); split % comes from Salesforce curator_margin_value. sf_product_lines: from Salesforce, STX only.</div>
       </div>
       <div class="picker-opts" id="metric-picker"></div>
       <div class="picker-actions">
@@ -383,15 +383,28 @@ const OTHER_FIELDS=['business_line','dsp','brand','deal_name','deal_id','seat_id
 function rowPass(r){return FIELDS.every(f=>{const s=selected[f]; if(s.size===0)return true; const v=r[f]; return v!=null&&s.has(v);});}
 const filteredRows=()=>ROWS.filter(rowPass);
 
-// Cascading options: for filter f, only values present in rows passing every OTHER filter,
-// sorted by gross revenue desc. Values already selected in f stay listed (pinned on top).
+// Cascading options: for filter f, only values present in rows passing every OTHER
+// filter, sorted by gross revenue desc. Computed for ALL fields in ONE pass over
+// ROWS (per-row failing-filter count trick) — refiltering per field is too slow
+// at ~800k rows. Values already selected in f stay listed (pinned on top).
+let _optCache=null;
+function computeOptionRevs(){
+  const active=FIELDS.filter(f=>selected[f].size>0);
+  const revs={}; FIELDS.forEach(f=>revs[f]=new Map());
+  const bump=(f,v,g)=>{ if(v==null||v==='')return; const m=revs[f]; m.set(v,(m.get(v)||0)+g); };
+  for(const r of ROWS){
+    let fails=0, failField=null;
+    for(const f of active){ const v=r[f]; if(v==null||!selected[f].has(v)){ if(++fails>1)break; failField=f; } }
+    const g=r.gross_revenue||0;
+    if(fails===0){ for(const f of FIELDS) bump(f,r[f],g); }
+    else if(fails===1){ bump(failField,r[failField],g); }  // row passes all filters except its own
+  }
+  _optCache=revs;
+}
 function optionsFor(f){
-  const rev=new Map();
-  ROWS.filter(r=>FIELDS.every(o=>{ if(o===f)return true; const s=selected[o]; if(s.size===0)return true;
-    const v=r[o]; return v!=null&&s.has(v); }))
-    .forEach(r=>{const v=r[f]; if(v!=null&&v!=='')rev.set(v,(rev.get(v)||0)+(r.gross_revenue||0));});
-  const opts=[...rev.entries()].sort((a,b)=>b[1]-a[1]).map(e=>e[0]);
-  const pinned=[...selected[f]].filter(v=>!opts.includes(v));
+  if(!_optCache)computeOptionRevs();
+  const opts=[..._optCache[f].entries()].sort((a,b)=>b[1]-a[1]).map(e=>e[0]);
+  const pinned=[...selected[f]].filter(v=>!_optCache[f].has(v));
   return [...pinned,...opts];
 }
 
@@ -414,13 +427,18 @@ function msHtml(f){
 function buildFilters(){
   document.getElementById('filter-curator').innerHTML=CURATOR_FIELDS.map(msHtml).join('');
   document.getElementById('filter-grid').innerHTML=OTHER_FIELDS.map(msHtml).join('');
-  FIELDS.forEach(buildOptions);
+  FIELDS.forEach(f=>buildOptions(f));
 }
-function buildOptions(f){
-  document.getElementById('ms-opts-'+f).innerHTML=optionsFor(f).map(v=>
+const MAX_OPTS=500;
+function buildOptions(f,q=''){
+  q=q.toLowerCase();
+  const all=optionsFor(f).filter(v=>!q||String(v).toLowerCase().includes(q));
+  const shown=all.slice(0,MAX_OPTS);
+  document.getElementById('ms-opts-'+f).innerHTML=shown.map(v=>
     `<label class="ms-option" data-val="${escapeHtml(v)}">
        <input type="checkbox" ${selected[f].has(v)?'checked':''} onchange="msPick('${f}','${encodeURIComponent(v)}',this.checked)">
-       <span title="${escapeHtml(v)}">${escapeHtml(v)}</span></label>`).join('');
+       <span title="${escapeHtml(v)}">${escapeHtml(v)}</span></label>`).join('')
+    +(all.length>MAX_OPTS?`<div class="ms-option muted">… ${fmtInt(all.length-MAX_OPTS)} more — refine the search</div>`:'');
 }
 function msToggle(f,e){
   e&&e.stopPropagation();
@@ -431,18 +449,19 @@ function msToggle(f,e){
 document.addEventListener('click',e=>{if(!e.target.closest('.ms-wrap'))FIELDS.forEach(f=>{
   document.getElementById('ms-dd-'+f).classList.remove('open');
   document.getElementById('ms-trig-'+f).classList.remove('open');});});
-function msSearch(f,q){q=q.toLowerCase();
-  document.querySelectorAll(`#ms-opts-${f} .ms-option`).forEach(o=>{o.style.display=(!q||o.dataset.val.toLowerCase().includes(q))?'':'none';});}
+function msSearch(f,q){buildOptions(f,q);}
 function msPick(f,enc,on){const v=decodeURIComponent(enc); if(on)selected[f].add(v); else selected[f].delete(v); applyFilters();}
 function msClear(f){selected[f].clear();buildOptions(f);
   const inp=document.querySelector(`#ms-dd-${f} .ms-search input`); if(inp){inp.value='';msSearch(f,'');} applyFilters();}
 function clearAllFilters(){FIELDS.forEach(f=>{selected[f].clear();buildOptions(f);});applyFilters();}
 function applyFilters(){
+  _optCache=null;
   FIELDS.forEach(f=>{const s=selected[f];
     document.getElementById('ms-label-'+f).textContent=s.size===0?'All':(s.size===1?[...s][0]:s.size+' selected');
     document.getElementById('ms-trig-'+f).classList.toggle('active-filter',s.size>0);
-    buildOptions(f); // cascade: every list reflects the other filters
-    const inp=document.querySelector(`#ms-dd-${f} .ms-search input`); if(inp&&inp.value)msSearch(f,inp.value);});
+    // cascade: every list reflects the other filters (keeps the search text)
+    const inp=document.querySelector(`#ms-dd-${f} .ms-search input`);
+    buildOptions(f,inp?inp.value:'');});
   page=1; rebuildAll();
 }
 
@@ -509,8 +528,10 @@ function buildChart(){
     svg+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`;
     svg+=`<text x="${padL-8}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--text-subtle)">${val>=1000?(val/1000).toFixed(0)+'k':val.toFixed(0)}</text>`;
   }
+  const lblEvery=Math.max(1,Math.ceil(DAYS.length/16));
   DAYS.forEach((d,i)=>{
-    svg+=`<text x="${padL+bw*i+bw/2}" y="${H-padB+16}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${d.slice(5)}</text>`;
+    if(i%lblEvery!==0&&i!==DAYS.length-1)return;
+    svg+=`<text x="${padL+bw*i+bw/2}" y="${H-padB+16}" text-anchor="middle" font-size="11" fill="var(--text-muted)">${DAYS.length>90?d.slice(0,7):d.slice(5)}</text>`;
   });
   if(chartType==='bar'){
     DAYS.forEach((d,i)=>{
@@ -520,7 +541,7 @@ function buildChart(){
         const h=(H-padT-padB)*v/maxY; yCur-=h;
         svg+=`<rect x="${x0}" y="${yCur}" width="${barW}" height="${h}" fill="${CHART_COLORS[ki%CHART_COLORS.length]}" rx="2"><title>${d} · ${escapeHtml(k)} · ${fmtMoney(v)}</title></rect>`;
       });
-      svg+=`<text x="${x0+barW/2}" y="${Math.max(padT+10,yOf(dayTotals[i])-6)}" text-anchor="middle" font-size="10" fill="var(--text-subtle)">${dayTotals[i]>=1000?(dayTotals[i]/1000).toFixed(1)+'k':dayTotals[i].toFixed(0)}</text>`;
+      if(DAYS.length<=31) svg+=`<text x="${x0+barW/2}" y="${Math.max(padT+10,yOf(dayTotals[i])-6)}" text-anchor="middle" font-size="10" fill="var(--text-subtle)">${dayTotals[i]>=1000?(dayTotals[i]/1000).toFixed(1)+'k':dayTotals[i].toFixed(0)}</text>`;
     });
   } else {
     keys.forEach((k,ki)=>{
@@ -528,7 +549,7 @@ function buildChart(){
       const pts=DAYS.map((d,i)=>[padL+bw*i+bw/2,yOf(series.get(k).get(d)||0)]);
       svg+=`<polyline points="${pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
       pts.forEach((p,i)=>{const v=series.get(k).get(DAYS[i])||0;
-        svg+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${col}"><title>${DAYS[i]} · ${escapeHtml(k)} · ${fmtMoney(v)}</title></circle>`;});
+        svg+=`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${DAYS.length>90?1.5:3.5}" fill="${col}"><title>${DAYS[i]} · ${escapeHtml(k)} · ${fmtMoney(v)}</title></circle>`;});
     });
   }
   svg+='</svg>';
@@ -546,7 +567,7 @@ function buildKpis(){
   const imps=rows.reduce((s,r)=>s+(r.impressions||0),0);
   const deals=new Set(rows.map(r=>r.deal_id)).size;
   document.getElementById('kpis').innerHTML=`
-    <div class="kpi-card"><div class="kpi-label">Gross revenue</div><div class="kpi-value">${fmtMoney(gross)}</div><div class="kpi-sub">EUR + USD mixed · 7 days</div></div>
+    <div class="kpi-card"><div class="kpi-label">Gross revenue</div><div class="kpi-value">${fmtMoney(gross)}</div><div class="kpi-sub">EUR + USD mixed · full range</div></div>
     <div class="kpi-card"><div class="kpi-label">Margin</div><div class="kpi-value">${fmtMoney(margin)}</div><div class="kpi-sub">${gross?(100*margin/gross).toFixed(1):'0'}% of gross</div></div>
     <div class="kpi-card"><div class="kpi-label">Impressions</div><div class="kpi-value">${fmtInt(imps)}</div><div class="kpi-sub">where SSP metrics available</div></div>
     <div class="kpi-card"><div class="kpi-label">Active deals</div><div class="kpi-value">${fmtInt(deals)}</div><div class="kpi-sub">distinct deal_id in window</div></div>`;

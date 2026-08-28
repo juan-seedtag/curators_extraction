@@ -1,6 +1,6 @@
 -- Deals daily evolution — STX (Seedtag delivery, EUR) + BFM (Beachfront, USD).
--- Window: last 7 closed days (was date_trunc('quarter', current_date) in the
--- QTD-validated version; only the lower bounds changed).
+-- Window: full history (no date filter; only today is excluded so the last
+-- day is always closed).
 WITH sf AS (
   SELECT
     deal_id,
@@ -44,8 +44,7 @@ dcm AS (
     , sum(ssp_hb_inserts) as hb_inserts
     , sum(impressions) as impressions
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour >= current_date - interval '7' day
-    AND date_hour < current_date  -- closed days only
+  WHERE date_hour < current_date  -- exclude today (partial day)
     AND deal_name IS NOT NULL
   GROUP BY 1, 2, 3
 ),
@@ -63,8 +62,7 @@ del AS (
     sum(curator_margin_eur) as curator_margin_total_eur,
     sum(publisher_cost_eur) as pub_cost_eur
   FROM big_query_bdb.business.daily_curation_delivery_utc
-  WHERE dt >= current_date - interval '7' day
-    AND dt < current_date  -- closed days only
+  WHERE dt < current_date  -- exclude today (partial day)
   GROUP BY 1, 2, 3, 4
 )
 
@@ -169,8 +167,7 @@ del AS (
     , cast(null as bigint) as sf_product_lines
   from st_datalakehouse.analytics.reporting_bfm_demand
   where business_line in ('Select - BFM','DSP Marketplace - BFM')
-    and date >= current_date - interval '7' day
-    and date < current_date  -- closed days only
+    and date < current_date  -- exclude today (partial day)
   group by date, business_line, deal_id, ad_name, clearvu_account, advertiser, seat_id
 )
 

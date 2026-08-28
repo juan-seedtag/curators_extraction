@@ -7,3 +7,4 @@ token.json
 credentials.json
 *service*account*.json
 prj-*.json
+output/
