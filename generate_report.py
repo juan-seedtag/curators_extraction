@@ -116,7 +116,7 @@ def main() -> None:
     stx = sum(r["gross_revenue"] or 0 for r in rows if r["origin"] == "STX")
     bfm = sum(r["gross_revenue"] or 0 for r in rows if r["origin"] == "BFM")
     print(f"  {len(rows):,} rows · {dates[0] if dates else '—'} → {dates[-1] if dates else '—'}"
-          f" · STX €{stx:,.2f} · BFM ${bfm:,.2f}")
+          f" · STX ${stx:,.2f} · BFM ${bfm:,.2f} (all USD)")
 
     html = generate_html(rows=rows, sql_text=sql_text,
                          now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

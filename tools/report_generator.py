@@ -1,7 +1,8 @@
 """Deals Daily Dashboard generator — fully self-contained HTML (no server).
 
 Single dataset (sql/deals_daily.sql): STX (Seedtag delivery, EUR) + BFM
-(Beachfront, USD) at deal-day grain, full history (today excluded).
+(Beachfront) at deal-day grain, full history (today excluded), all amounts in
+USD (STX converted from EUR with monthly average rates).
 
 UI (approved mockup): KPI strip → cascading filters (curator first) →
 daily-evolution SVG chart (bar/line, color by origin or business line) →
@@ -215,7 +216,7 @@ footer.report-footer svg{opacity:.75}
   </svg>
   <div>
     <h1>Deals Daily Dashboard</h1>
-    <div class="subtitle">Analytics Team &middot; <span id="hdr-range"></span> &middot; STX (Seedtag delivery, EUR) + BFM (Beachfront, USD)
+    <div class="subtitle">Analytics Team &middot; <span id="hdr-range"></span> &middot; STX (Seedtag delivery) + BFM (Beachfront) &middot; all amounts USD
       <span class="info-icon" title="View SQL" onclick="toggleTooltip(event,'sql-tip')" style="vertical-align:-4px;margin-left:4px">i</span>
       <div class="tooltip sql" id="sql-tip"></div>
     </div>
@@ -224,7 +225,7 @@ footer.report-footer svg{opacity:.75}
 
 <div class="page">
 
-<div class="note-banner">💶/💵 <strong>Currency caveat:</strong> STX amounts are <strong>EUR</strong>, BFM amounts are <strong>USD</strong> — totals and KPIs mix both currencies.
+<div class="note-banner">💵 <strong>Currency:</strong> all amounts are <strong>USD</strong> — STX figures are converted from EUR using the monthly average rate (currency_rates_monthly).
 &nbsp;·&nbsp; Funnel metrics naming differs between SSP (STX) and Beachfront (BFM) — see the <span class="info-icon" style="vertical-align:-4px" onclick="toggleTooltip(event,'funnel-tip')">i</span> tooltip.
 &nbsp;·&nbsp; curator margin split comes from Salesforce (curator_margin_value); deals without a Salesforce record keep their full margin on the Seedtag side.
 <div class="tooltip" id="funnel-tip">Beachfront uses a different funnel naming convention (Swap, Dec-2025):
@@ -242,7 +243,15 @@ Internal win rate = ads_served / total_bids_placed; external = impressions / ads
 
 <div class="card">
   <div class="card-header">🔎 Filters <span class="muted" style="font-weight:400">— pick the curator first · options cascade (each list only shows values compatible with the other filters) · sorted by revenue</span>
-    <div class="spacer"></div><button class="mini-btn" onclick="clearAllFilters()">Clear all</button>
+    <div class="spacer"></div>
+    <span class="flabel">Period</span>
+    <button class="seg-btn period-btn active" data-days="7" onclick="setLastDays(7)">7d</button>
+    <button class="seg-btn period-btn" data-days="30" onclick="setLastDays(30)">30d</button>
+    <button class="seg-btn period-btn" data-days="90" onclick="setLastDays(90)">90d</button>
+    <button class="seg-btn period-btn" data-days="0" onclick="setLastDays(0)">All</button>
+    <input class="email-box" id="custom-days" type="number" min="1" step="1" placeholder="X days"
+           style="min-width:90px;width:90px" onchange="setLastDays(parseInt(this.value)||0)">
+    <button class="mini-btn" onclick="clearAllFilters()">Clear all</button>
   </div>
   <div class="curator-row" id="filter-curator"></div>
   <div class="filter-sep">More filters</div>
@@ -331,9 +340,7 @@ const SQL_TEXT=__SQL_JSON__;
 
 const DAYS=[...new Set(ROWS.map(r=>String(r.date).slice(0,10)))].sort();
 ROWS.forEach(r=>r.date=String(r.date).slice(0,10));
-const RANGE=DAYS.length?DAYS[0]+' → '+DAYS[DAYS.length-1]:'(no data)';
-document.getElementById('hdr-range').textContent=RANGE;
-document.getElementById('ftr-range').textContent=RANGE;
+
 
 /* ══════════════ config ══════════════ */
 const FIELDS=['deal_id','salesforce_crm_id','currency','deal_name','name_source','business_line','brand','agency_group_name','agency','dsp','seat_id','country_served','country_sold','owner','am_csm','inventory_type'];
@@ -345,6 +352,23 @@ const selFields=new Set(['deal_id','deal_name','business_line','dsp']);
 const selMetrics=new Set(['gross_revenue','pub_cost','margin','impressions']);
 const selected={}; FIELDS.forEach(f=>selected[f]=new Set());
 let colorBy='origin', chartType='bar', sortCol=null, sortDir=-1, page=1; const PAGE_SIZE=25;
+// Period filter: keep only the last N closed days (0 = all). Default 7.
+let lastDays=7;
+const activeDays=()=>lastDays?DAYS.slice(-lastDays):DAYS;
+const dateCutoff=()=>lastDays?activeDays()[0]:null;
+function setLastDays(n){
+  lastDays=Math.max(0,n|0);
+  document.querySelectorAll('.period-btn').forEach(b=>b.classList.toggle('active',+b.dataset.days===lastDays));
+  const inp=document.getElementById('custom-days');
+  if(![7,30,90,0].includes(lastDays)) inp.value=lastDays; else inp.value='';
+  updateRangeLabels();
+  applyFilters();
+}
+function updateRangeLabels(){
+  const d=activeDays(), lbl=d.length?d[0]+' → '+d[d.length-1]:'(no data)';
+  document.getElementById('hdr-range').textContent=lbl;
+  document.getElementById('ftr-range').textContent=lbl;
+}
 
 const fmtMoney=n=>n==null?'—':(Number(n)).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtInt=n=>n==null?'—':(Number(n)).toLocaleString('en-US');
@@ -380,7 +404,9 @@ const CURATOR_FIELDS=['agency_group_name','agency'];
 const OTHER_FIELDS=['business_line','dsp','brand','deal_name','deal_id','seat_id',
   'country_served','country_sold','owner','am_csm','inventory_type',
   'name_source','currency','salesforce_crm_id'];
-function rowPass(r){return FIELDS.every(f=>{const s=selected[f]; if(s.size===0)return true; const v=r[f]; return v!=null&&s.has(v);});}
+function rowPass(r){
+  const cut=dateCutoff(); if(cut&&r.date<cut)return false;
+  return FIELDS.every(f=>{const s=selected[f]; if(s.size===0)return true; const v=r[f]; return v!=null&&s.has(v);});}
 const filteredRows=()=>ROWS.filter(rowPass);
 
 // Cascading options: for filter f, only values present in rows passing every OTHER
@@ -392,7 +418,9 @@ function computeOptionRevs(){
   const active=FIELDS.filter(f=>selected[f].size>0);
   const revs={}; FIELDS.forEach(f=>revs[f]=new Map());
   const bump=(f,v,g)=>{ if(v==null||v==='')return; const m=revs[f]; m.set(v,(m.get(v)||0)+g); };
+  const cut=dateCutoff();
   for(const r of ROWS){
+    if(cut&&r.date<cut)continue;  // period filter applies to option lists too
     let fails=0, failField=null;
     for(const f of active){ const v=r[f]; if(v==null||!selected[f].has(v)){ if(++fails>1)break; failField=f; } }
     const g=r.gross_revenue||0;
@@ -507,6 +535,7 @@ function setChartType(v){chartType=v;
   document.getElementById('ct-line').classList.toggle('active',v==='line');
   buildChart();}
 function buildChart(){
+  const DAYS=activeDays();
   const rows=filteredRows();
   const series=new Map(); // key -> {day -> sum}
   rows.forEach(r=>{
@@ -556,7 +585,7 @@ function buildChart(){
   document.getElementById('chart').innerHTML=svg;
   document.getElementById('chart-legend').innerHTML=keys.map((k,i)=>
     `<span class="li"><span class="sw" style="background:${CHART_COLORS[i%CHART_COLORS.length]}"></span>${escapeHtml(k)}</span>`).join('')
-    +'<span class="li muted">· mixed EUR (STX) + USD (BFM)</span>';
+    +'<span class="li muted">· USD</span>';
 }
 
 /* ══════════════ KPIs ══════════════ */
@@ -567,7 +596,7 @@ function buildKpis(){
   const imps=rows.reduce((s,r)=>s+(r.impressions||0),0);
   const deals=new Set(rows.map(r=>r.deal_id)).size;
   document.getElementById('kpis').innerHTML=`
-    <div class="kpi-card"><div class="kpi-label">Gross revenue</div><div class="kpi-value">${fmtMoney(gross)}</div><div class="kpi-sub">EUR + USD mixed · full range</div></div>
+    <div class="kpi-card"><div class="kpi-label">Gross revenue</div><div class="kpi-value">${fmtMoney(gross)}</div><div class="kpi-sub">USD · selected period</div></div>
     <div class="kpi-card"><div class="kpi-label">Margin</div><div class="kpi-value">${fmtMoney(margin)}</div><div class="kpi-sub">${gross?(100*margin/gross).toFixed(1):'0'}% of gross</div></div>
     <div class="kpi-card"><div class="kpi-label">Impressions</div><div class="kpi-value">${fmtInt(imps)}</div><div class="kpi-sub">where SSP metrics available</div></div>
     <div class="kpi-card"><div class="kpi-label">Active deals</div><div class="kpi-value">${fmtInt(deals)}</div><div class="kpi-sub">distinct deal_id in window</div></div>`;
@@ -623,7 +652,7 @@ function rebuildTable(){
     if(METRICS.includes(c))return `<td class="number">${MONEY.has(c)?fmtMoney(tot[c]):fmtInt(tot[c])}</td>`;
     return '<td></td>';}).join('')+'</tr>';
   document.getElementById('tbl-body').innerHTML=body;
-  document.getElementById('tbl-count').textContent=`${fmtInt(rows.length)} rows · grain: date + ${dims.slice(1).join(', ')||'(none)'} · ⚠ EUR+USD mixed in totals`;
+  document.getElementById('tbl-count').textContent=`${fmtInt(rows.length)} rows · grain: date + ${dims.slice(1).join(', ')||'(none)'}`;
   renderPagination('tbl-pag',pages,page,p=>{page=p;rebuildTable();});
 }
 
@@ -639,24 +668,25 @@ function downloadCSV(matrix,name){
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name+'.csv';
   document.body.appendChild(a);a.click();a.remove();
 }
-const csvName=()=>'deals_daily_'+(DAYS[0]||'')+'_to_'+(DAYS[DAYS.length-1]||'');
+const csvName=()=>{const d=activeDays();return 'deals_daily_'+(d[0]||'')+'_to_'+(d[d.length-1]||'');};
 function tableCSV(){downloadCSV(csvMatrix(),csvName());}
 function prepareEmail(){
   const to=document.getElementById('email-to').value.trim();
   if(!to){alert('Enter a recipient email first.');return;}
   downloadCSV(csvMatrix(),csvName());
-  const subject=encodeURIComponent('Deals daily report '+RANGE);
+  const d=activeDays();
+  const subject=encodeURIComponent('Deals daily report '+(d[0]||'')+' → '+(d[d.length-1]||''));
   const body=encodeURIComponent(
-    'Hi,\n\nPlease find attached the deals daily report ('+RANGE+').\n\n'+
+    'Hi,\n\nPlease find attached the deals daily report ('+(d[0]||'')+' → '+(d[d.length-1]||'')+').\n\n'+
     'Note: the CSV ('+csvName()+'.csv) was just downloaded to your machine — attach it to this email before sending (mail links cannot attach files automatically).\n\n'+
-    'Caveats: STX amounts are EUR, BFM amounts are USD (mixed in totals). BFM funnel metrics use Beachfront naming and are not 1:1 comparable with STX SSP metrics.\n\n'+
+    'Notes: all amounts are USD (STX converted from EUR at monthly average rates). BFM funnel metrics use Beachfront naming and are not 1:1 comparable with STX SSP metrics.\n\n'+
     'Analytics Team');
   window.location.href='mailto:'+encodeURIComponent(to)+'?subject='+subject+'&body='+body;
 }
 
 /* ══════════════ boot ══════════════ */
 function rebuildAll(){buildKpis();buildChart();rebuildTable();}
-buildPickers();buildFilters();rebuildAll();
+updateRangeLabels();buildPickers();buildFilters();rebuildAll();
 </script>
 </body>
 </html>

@@ -1,4 +1,6 @@
--- Deals daily evolution — STX (Seedtag delivery, EUR) + BFM (Beachfront, USD).
+-- Deals daily evolution — STX (Seedtag delivery) + BFM (Beachfront), all in USD.
+-- STX source amounts are EUR and are converted with the monthly average rate
+-- (analytics.currency_rates_monthly: rate_euros = EUR per 1 USD → divide).
 -- Window: full history (no date filter; only today is excluded so the last
 -- day is always closed).
 WITH sf AS (
@@ -66,12 +68,23 @@ del AS (
   GROUP BY 1, 2, 3, 4
 )
 
+, fx as (
+  -- USD per 1 EUR, per month. fx_latest is the fallback for months the rates
+  -- table doesn't cover yet (better a slightly stale rate than NULL revenue).
+  SELECT date(date) AS month_start, 1 / rate_euros AS usd_per_eur
+  FROM st_datalakehouse.analytics.currency_rates_monthly
+  WHERE currency = 'USD'
+)
+, fx_latest as (
+  SELECT usd_per_eur FROM fx ORDER BY month_start DESC LIMIT 1
+)
+
 , stx as (
   SELECT
     del.dt as date,
     del.deal_id,
     del.salesforce_crm_id,
-    del.currency,
+    'USD' as currency,
     COALESCE(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, '(unnamed)') AS deal_name,
     'Seedtag' as name_source,
     CASE
@@ -95,17 +108,19 @@ del AS (
     sf.owner,
     sf.am_csm,
     sf.inventory_type,
-    del.gross_revenue_eur            AS gross_revenue,
-    del.pub_cost_eur                 AS pub_cost,
-    del.curator_margin_total_eur     AS curator_margin_total,
-    round(del.curator_margin_total_eur * (1 - sf.curator_margin_split), 2) AS curator_margin_stx,
-    round(del.curator_margin_total_eur * sf.curator_margin_split, 2)       AS curator_margin_curator,
+    round(del.gross_revenue_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS gross_revenue,
+    round(del.pub_cost_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2)       AS pub_cost,
+    round(del.curator_margin_total_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_total,
+    round(del.curator_margin_total_eur * (1 - sf.curator_margin_split)
+          * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_stx,
+    round(del.curator_margin_total_eur * sf.curator_margin_split
+          * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_curator,
     -- coalesce: sin curator margin / discount el margen es gross - pub cost,
     -- no NULL (NULL se propagaria por la resta)
-    round(del.gross_revenue_eur
+    round((del.gross_revenue_eur
           - coalesce(del.curator_margin_total_eur * sf.curator_margin_split, 0)
           - coalesce(del.post_auction_discount_eur, 0)
-          - del.pub_cost_eur, 2)     AS margin,
+          - del.pub_cost_eur) * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS margin,
     -- dcm es diario (join por dia): metricas sumables sin deduplicar
     dcm.requests,
     dcm.bids,
@@ -117,6 +132,8 @@ del AS (
   LEFT JOIN sf  ON del.deal_id = sf.deal_id
   LEFT JOIN dcm ON del.deal_id = dcm.deal_id
     AND dcm.date = del.dt
+  LEFT JOIN fx  ON date_trunc('month', del.dt) = fx.month_start
+  CROSS JOIN fx_latest
 )
 
 -- Beachfront usa otra convencion de nombres (Swap, dic-2025):
@@ -193,7 +210,7 @@ del AS (
 
 SELECT
   u.*,
-  -- Pct sobre el total combinado; ojo: mezcla EUR (STX) y USD (BFM).
+  -- Pct sobre el total combinado (todo USD).
   round(100 * gross_revenue / sum(gross_revenue) OVER (), 2) AS pct_of_qtd
 FROM unioned u
 ORDER BY gross_revenue DESC
