@@ -21,6 +21,12 @@ WITH sf AS (
       ELSE 'Web'
     END AS inventory_type,
     format,
+    -- curator_margin_value viene en porcentaje (80-100 en la tabla hoy) → /100
+    -- para dejarlo como fraccion 0-1, que es lo que esperan las formulas
+    -- curator_margin_total * split y * (1 - split). Sin valor → 0 (todo a STX).
+    -- OJO: sum() sobre las product lines del deal; hoy todas tienen 1 linea con
+    -- valor, pero un deal multi-linea sumaria >1 — revisar si aparece el caso.
+    coalesce(sum(curator_margin_value), 0) / 100.0 AS curator_margin_split,
     count(*) AS sf_product_lines
   FROM big_query_bdb.business.salesforce_curation_product_lines
   WHERE deal_id IS NOT NULL
@@ -55,9 +61,6 @@ del AS (
     sum(platform_fee_eur) as platform_fee_eur,
     sum(post_auction_discount_eur) as post_auction_discount_eur,
     sum(curator_margin_eur) as curator_margin_total_eur,
-    -- TODO: columna real del split pendiente de confirmar (no existe *_split en la tabla).
-    -- Sustituir 0.30 por la columna/fuente correcta cuando se identifique.
-    max(0.30) as curator_margin_split,
     sum(publisher_cost_eur) as pub_cost_eur
   FROM big_query_bdb.business.daily_curation_delivery_utc
   WHERE dt >= current_date - interval '7' day
@@ -97,12 +100,12 @@ del AS (
     del.gross_revenue_eur            AS gross_revenue,
     del.pub_cost_eur                 AS pub_cost,
     del.curator_margin_total_eur     AS curator_margin_total,
-    round(del.curator_margin_total_eur * (1 - del.curator_margin_split), 2) AS curator_margin_stx,
-    round(del.curator_margin_total_eur * del.curator_margin_split, 2)       AS curator_margin_curator,
+    round(del.curator_margin_total_eur * (1 - sf.curator_margin_split), 2) AS curator_margin_stx,
+    round(del.curator_margin_total_eur * sf.curator_margin_split, 2)       AS curator_margin_curator,
     -- coalesce: sin curator margin / discount el margen es gross - pub cost,
     -- no NULL (NULL se propagaria por la resta)
     round(del.gross_revenue_eur
-          - coalesce(del.curator_margin_total_eur * del.curator_margin_split, 0)
+          - coalesce(del.curator_margin_total_eur * sf.curator_margin_split, 0)
           - coalesce(del.post_auction_discount_eur, 0)
           - del.pub_cost_eur, 2)     AS margin,
     -- dcm es diario (join por dia): metricas sumables sin deduplicar
