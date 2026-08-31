@@ -121,3 +121,25 @@ def upload_to_drive(
     file_url = f"https://drive.google.com/file/d/{file_id}/view"
     print(f"  {file_url}")
     return file_url
+
+
+def upload_to_drive_file_id(
+    service_account_json_path: str,
+    file_id: str,
+    file_path: str,
+) -> str:
+    """Update a specific Drive file in place (fixed file ID → stable share link).
+
+    Used when the share link (e.g. an Apps Script viewer ?fileId=…) points at a
+    known file: updating by ID sidesteps the name+folder upsert entirely.
+    """
+    creds = service_account.Credentials.from_service_account_file(
+        str(Path(service_account_json_path)),
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+    media = MediaFileUpload(str(Path(file_path)), mimetype="text/html", resumable=False)
+    svc.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+    url = f"https://drive.google.com/file/d/{file_id}/view"
+    print(f"  Updated file in place (ID: {file_id})\n  {url}")
+    return url

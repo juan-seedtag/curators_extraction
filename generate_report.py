@@ -56,6 +56,9 @@ DRIVE_SA_JSON = os.getenv(
 DRIVE_ROOT_FOLDER_ID = os.getenv("DRIVE_ROOT_FOLDER_ID", "1TAFpUwZLeat4wNWPYeQGayLE56UMfBvl")
 DRIVE_SUBFOLDER = os.getenv("DRIVE_SUBFOLDER", "Ad Exchange Dashboard")
 DRIVE_FILENAME = os.getenv("DRIVE_FILENAME", "deals_dashboard.html")
+# The shared link (Apps Script viewer) points at this exact file — update it in
+# place by ID so the link always shows the latest build.
+DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "1kPq3o3RoNHnabU7rZvA6piHgDE3yOgBO")
 
 INT_FIELDS = ("salesforce_crm_id", "requests", "bids", "wins", "impressions",
               "sf_product_lines")
@@ -124,10 +127,14 @@ def main() -> None:
     print(f"  ✓ {HTML_PATH} ({HTML_PATH.stat().st_size/1024:,.0f} KB)")
 
     if args.upload:
-        from tools.drive_upload import upload_to_drive
         print("Uploading to Google Drive …")
-        upload_to_drive(DRIVE_SA_JSON, DRIVE_ROOT_FOLDER_ID, DRIVE_SUBFOLDER,
-                        DRIVE_FILENAME, str(HTML_PATH))
+        if DRIVE_FILE_ID:
+            from tools.drive_upload import upload_to_drive_file_id
+            upload_to_drive_file_id(DRIVE_SA_JSON, DRIVE_FILE_ID, str(HTML_PATH))
+        else:
+            from tools.drive_upload import upload_to_drive
+            upload_to_drive(DRIVE_SA_JSON, DRIVE_ROOT_FOLDER_ID, DRIVE_SUBFOLDER,
+                            DRIVE_FILENAME, str(HTML_PATH))
 
 
 if __name__ == "__main__":
