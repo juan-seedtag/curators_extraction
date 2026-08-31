@@ -1,9 +1,11 @@
-# Rebuild the Deals Daily Dashboard every day at 09:00 Madrid time and publish
-# it to Google Drive (stable filename deals_dashboard.html).
+# Rebuild the Deals Daily Dashboard once a day and publish it to Google Drive
+# (stable filename deals_dashboard.html).
 #
-# GitHub cron runs in UTC and Madrid switches CET/CEST, so we schedule BOTH
-# 07:00 and 08:00 UTC and a guard step lets only the run where it is actually
-# 09:00 in Europe/Madrid proceed (manual workflow_dispatch always proceeds).
+# Scheduled for 07:00 UTC (09:00 Madrid in summer, 08:00 in winter) — but note
+# GitHub delays cron jobs under load, often by hours, so treat this as "runs
+# once every morning", not an exact time. An earlier version guarded on the
+# clock reading exactly 09:00 Madrid; with GitHub's drift the guard skipped
+# every scheduled run (green but no build), so it was removed.
 #
 # Required repository secrets:
 #   SEEDTAG_TOKEN_JSON — contents of ~/.config/seedtag/token.json (Google OAuth
@@ -16,34 +18,20 @@ name: Daily deals dashboard
 
 on:
   schedule:
-    - cron: '0 7 * * *'   # 09:00 Madrid while on CEST (summer)
-    - cron: '0 8 * * *'   # 09:00 Madrid while on CET (winter)
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Guard — only proceed at 09:00 Europe/Madrid
-        id: guard
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=Europe/Madrid date +%H)" = "09" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Not 09:00 in Madrid — skipping (the other cron entry covers this DST period)."
-          fi
-
       - name: Checkout
-        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Install uv
-        if: steps.guard.outputs.run == 'true'
         uses: astral-sh/setup-uv@v5
 
       - name: Write credentials
-        if: steps.guard.outputs.run == 'true'
         run: |
           umask 077
           printf '%s' "$SEEDTAG_TOKEN_JSON" > "$RUNNER_TEMP/token.json"
@@ -53,14 +41,12 @@ jobs:
           DRIVE_SA_JSON: ${{ secrets.DRIVE_SA_JSON }}
 
       - name: Build and upload to Drive
-        if: steps.guard.outputs.run == 'true'
         run: uv run python generate_report.py --upload
         env:
           SEEDTAG_TOKEN_PATH: ${{ runner.temp }}/token.json
           DRIVE_SA_JSON: ${{ runner.temp }}/drive_sa.json
 
       - name: Keep HTML as run artifact (debugging)
-        if: steps.guard.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: deals_dashboard
