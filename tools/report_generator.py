@@ -1,7 +1,7 @@
 """Deals Daily Dashboard generator — fully self-contained HTML (no server).
 
 Single dataset (sql/deals_daily.sql): STX (Seedtag delivery, EUR) + BFM
-(Beachfront) at deal-day grain, last 90 closed days, all amounts in
+(Beachfront), last 30 closed days, all amounts in
 USD (STX converted from EUR with monthly average rates).
 
 UI (approved mockup): KPI strip → cascading filters (curator first) →
@@ -227,7 +227,7 @@ footer.report-footer svg{opacity:.75}
 
 <div class="note-banner">💵 <strong>Currency:</strong> all amounts are <strong>USD</strong> — STX figures are converted from EUR using the monthly average rate (currency_rates_monthly).
 &nbsp;·&nbsp; Funnel metrics naming differs between SSP (STX) and Beachfront (BFM) — see the <span class="info-icon" style="vertical-align:-4px" onclick="toggleTooltip(event,'funnel-tip')">i</span> tooltip.
-&nbsp;·&nbsp; curator margin split comes from Salesforce (curator_margin_value); deals without a Salesforce record keep their full margin on the Seedtag side.
+&nbsp;·&nbsp; curator margin split comes from Salesforce (curator_margin_value); deals without a Salesforce record keep their full margin on the Seedtag side. · BFM brands covering 95% of window revenue keep their name; the tail shows as '(other)'.
 <div class="tooltip" id="funnel-tip">Beachfront uses a different funnel naming convention (Swap, Dec-2025):
 
 • bids = outgoing_bids (input bids): bids the DSP sends to the SSP. Top of the demand funnel.
@@ -247,7 +247,7 @@ Internal win rate = ads_served / total_bids_placed; external = impressions / ads
     <span class="flabel">Period</span>
     <button class="seg-btn period-btn active" data-days="7" onclick="setLastDays(7)">7d</button>
     <button class="seg-btn period-btn" data-days="30" onclick="setLastDays(30)">30d</button>
-    <button class="seg-btn period-btn" data-days="90" onclick="setLastDays(90)">90d</button>
+    <button class="seg-btn period-btn" data-days="14" onclick="setLastDays(14)">14d</button>
     <button class="seg-btn period-btn" data-days="0" onclick="setLastDays(0)">All</button>
     <input class="email-box" id="custom-days" type="number" min="1" step="1" placeholder="X days"
            style="min-width:90px;width:90px" onchange="setLastDays(parseInt(this.value)||0)">
@@ -343,9 +343,9 @@ ROWS.forEach(r=>r.date=String(r.date).slice(0,10));
 
 
 /* ══════════════ config ══════════════ */
-const FIELDS=['deal_id','salesforce_crm_id','currency','deal_name','name_source','business_line','brand','agency_group_name','agency','dsp','seat_id','country_served','country_sold','owner','am_csm','inventory_type'];
-const METRICS=['gross_revenue','pub_cost','curator_margin_total','curator_margin_stx','curator_margin_curator','margin','requests','bids','wins','impressions','sf_product_lines'];
-const MONEY=new Set(['gross_revenue','pub_cost','curator_margin_total','curator_margin_stx','curator_margin_curator','margin']);
+const FIELDS=['deal_id','salesforce_crm_id','currency','deal_name','name_source','business_line','brand','agency_group_name','agency','channel_id','dsp','connection_type','seat_id','country_served','country_sold','owner','am_csm','inventory_type','format'];
+const METRICS=['platform_spend','gross_revenue','pub_cost','curator_margin_total','curator_margin_stx','curator_margin_curator','margin','requests','bids','wins','impressions','sf_product_lines'];
+const MONEY=new Set(['platform_spend','gross_revenue','pub_cost','curator_margin_total','curator_margin_stx','curator_margin_curator','margin']);
 const CHART_COLORS=['#5476FF','#E866F4','#948A8A','#67C8FE','#FFA071','#A36AFF','#F4D56D'];
 
 const selFields=new Set(['deal_id','deal_name','business_line','dsp']);
@@ -360,7 +360,7 @@ function setLastDays(n){
   lastDays=Math.max(0,n|0);
   document.querySelectorAll('.period-btn').forEach(b=>b.classList.toggle('active',+b.dataset.days===lastDays));
   const inp=document.getElementById('custom-days');
-  if(![7,30,90,0].includes(lastDays)) inp.value=lastDays; else inp.value='';
+  if(![7,14,30,0].includes(lastDays)) inp.value=lastDays; else inp.value='';
   updateRangeLabels();
   applyFilters();
 }
@@ -401,8 +401,8 @@ document.addEventListener('click',()=>document.querySelectorAll('.tooltip.active
 /* ══════════════ filters (ms-* pattern, cascading) ══════════════ */
 // Curator filters go first and are visually prominent; the rest is ordered by usefulness.
 const CURATOR_FIELDS=['agency_group_name','agency'];
-const OTHER_FIELDS=['business_line','dsp','brand','deal_name','deal_id','seat_id',
-  'country_served','country_sold','owner','am_csm','inventory_type',
+const OTHER_FIELDS=['business_line','dsp','connection_type','channel_id','brand','deal_name','deal_id','seat_id',
+  'country_served','country_sold','owner','am_csm','inventory_type','format',
   'name_source','currency','salesforce_crm_id'];
 function rowPass(r){
   const cut=dateCutoff(); if(cut&&r.date<cut)return false;

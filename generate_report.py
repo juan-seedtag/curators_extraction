@@ -2,7 +2,7 @@
 """
 Deals Daily Dashboard
 =====================
-Self-contained HTML report of deal-level daily revenue, last 7 closed days,
+Self-contained HTML report of deal-level daily revenue, last 30 closed days,
 mixing two origins:
 
   STX — Seedtag delivery (big_query_bdb.business.daily_curation_delivery_utc,
@@ -62,13 +62,13 @@ DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "1kPq3o3RoNHnabU7rZvA6piHgDE3yOgBO")
 
 INT_FIELDS = ("salesforce_crm_id", "requests", "bids", "wins", "impressions",
               "sf_product_lines")
-FLOAT_FIELDS = ("gross_revenue", "pub_cost", "curator_margin_total",
+FLOAT_FIELDS = ("platform_spend", "gross_revenue", "pub_cost", "curator_margin_total",
                 "curator_margin_stx", "curator_margin_curator", "margin",
                 "pct_of_qtd")
 STR_FIELDS = ("origin", "deal_id", "currency", "deal_name", "name_source",
-              "business_line", "brand", "agency_group_name", "agency", "dsp",
-              "seat_id", "country_served", "country_sold", "owner", "am_csm",
-              "inventory_type")
+              "business_line", "brand", "agency_group_name", "agency", "channel_id",
+              "dsp", "connection_type", "seat_id", "country_served", "country_sold",
+              "owner", "am_csm", "inventory_type", "format")
 
 
 def _norm_row(r: dict) -> dict:
