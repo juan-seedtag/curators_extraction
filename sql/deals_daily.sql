@@ -9,12 +9,12 @@
 -- once BFM adomain left the grain; the HTML embeds the payload gzipped.
 -- BFM brand (adomain) removed for now — NULL until a curated mapping exists
 -- (it multiplied the grain; see git history for the 95%-coverage version).
--- HEALTH VIEW: STX base = delivery ∪ Salesforce; the SSP funnel (dcm) only
--- enriches delivery rows. Deals with funnel activity but no delivery appear
--- via Salesforce (as "Salesforce only", without funnel metrics); funnel-only
--- deals outside SF are excluded (dcm covers the whole exchange). BFM
--- zero-revenue rows come from the source table as-is. first_seen = first date
--- the deal ever appeared in any source (full history).
+-- HEALTH VIEW: STX base = delivery ∪ curation-filtered SSP funnel ∪ Salesforce
+-- (FULL OUTER). dcm is pre-filtered to deals known to SF or with 2026 delivery,
+-- so no exchange noise enters while traffic-without-delivery days keep their
+-- funnel metrics ("no bids"/"no requests" states). Salesforce-only deals show
+-- once, dated on the last closed day. BFM zero-revenue rows come from the
+-- source as-is. first_seen = first date the deal ever appeared (full history).
 WITH sf AS (
   SELECT
     deal_id,
@@ -70,6 +70,13 @@ dcm AS (
   WHERE date_hour >= date '2026-01-01'
     AND date_hour < current_date  -- closed days only
     AND deal_name IS NOT NULL
+    -- dcm cubre TODO el exchange: solo deals de curation — conocidos en SF o
+    -- con delivery este año. Cero identidades nuevas vs la poblacion del
+    -- dashboard; solo recupera los dias con trafico sin delivery (no bids).
+    AND (deal_id IN (SELECT deal_id FROM big_query_bdb.business.salesforce_curation_product_lines
+                     WHERE deal_id IS NOT NULL)
+         OR deal_id IN (SELECT DISTINCT deal_id FROM big_query_bdb.business.daily_curation_delivery_utc
+                        WHERE dt >= date '2026-01-01'))
   GROUP BY 1, 2, 3
 ),
 -- Curation agency name per deal, deduped to ONE row per deal — joining the
@@ -102,10 +109,9 @@ del AS (
   GROUP BY 1, 2, 3, 4
 )
 
--- STX base = delivery ∪ Salesforce (FULL OUTER on sf). dcm is a LEFT JOIN
--- enrichment only: deals appearing solely in the exchange funnel are excluded
--- by design (dcm covers the whole exchange, not just curation). Salesforce
--- deals without delivery show once, dated on the last closed day.
+-- STX = delivery FULL OUTER curation-filtered funnel FULL OUTER Salesforce:
+-- every population keeps whatever fields its sources have; the dcm filter
+-- guarantees no non-curation deal can enter.
 , stx as (
   SELECT
     coalesce(del.dt, dcm.date, current_date - interval '1' day) as date,
@@ -165,11 +171,9 @@ del AS (
     del.active_days,
     sf.sf_product_lines
   FROM del
-  -- LEFT (no FULL OUTER): dcm cubre todo el exchange; los deals solo-dcm sin
-  -- delivery ni SF no interesan aqui. Coste: un deal de curation con actividad
-  -- SSP pero sin delivery pierde sus metricas de funnel (aparece via SF como
-  -- "Salesforce only").
-  LEFT JOIN dcm ON del.deal_id = dcm.deal_id AND del.dt = dcm.date
+  -- FULL OUTER es seguro porque dcm ya viene filtrado a deals de curation:
+  -- recupera los dias con trafico SSP pero sin delivery (estado "no bids").
+  FULL OUTER JOIN dcm ON del.deal_id = dcm.deal_id AND del.dt = dcm.date
   FULL OUTER JOIN sf  ON coalesce(del.deal_id, dcm.deal_id) = sf.deal_id
   LEFT JOIN cur ON coalesce(del.deal_id, dcm.deal_id, sf.deal_id) = cur.deal_id
 )
