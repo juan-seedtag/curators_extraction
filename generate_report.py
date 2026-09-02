@@ -2,7 +2,7 @@
 """
 Deals Daily Dashboard
 =====================
-Self-contained HTML report of deal-level daily revenue, last 30 closed days,
+Self-contained deals HEALTH report, last 30 closed days, funnel-first,
 mixing two origins:
 
   STX — Seedtag delivery (big_query_bdb.business.daily_curation_delivery_utc,
@@ -62,9 +62,9 @@ DRIVE_FILE_ID = os.getenv("DRIVE_FILE_ID", "1kPq3o3RoNHnabU7rZvA6piHgDE3yOgBO")
 
 INT_FIELDS = ("salesforce_crm_id", "requests", "bids", "wins", "impressions",
               "sf_product_lines")
-FLOAT_FIELDS = ("platform_spend", "gross_revenue", "pub_cost", "curator_margin_total",
-                "curator_margin_stx", "curator_margin_curator", "margin",
-                "pct_of_qtd")
+_MONEY = ("platform_spend", "gross_revenue", "pub_cost", "curator_margin_total",
+          "curator_margin_stx", "curator_margin_curator", "margin")
+FLOAT_FIELDS = tuple(m + s for m in _MONEY for s in ("_lc", "_eur")) + ("pct_of_total",)
 STR_FIELDS = ("origin", "deal_id", "currency", "deal_name", "name_source",
               "business_line", "brand", "agency_group_name", "agency", "channel_id",
               "dsp", "connection_type", "seat_id", "country_served", "country_sold",
@@ -75,6 +75,8 @@ def _norm_row(r: dict) -> dict:
     """Normalise types in place (shared by Trino + CSV paths): Decimals/strs →
     float/int, empty strings → None, dates → ISO str."""
     r["date"] = str(r["date"])[:10]
+    if r.get("first_seen"):
+        r["first_seen"] = str(r["first_seen"])[:10]
     for k in FLOAT_FIELDS:
         v = r.get(k)
         r[k] = round(float(v), 2) if v not in (None, "") else None
@@ -116,10 +118,10 @@ def main() -> None:
         print(f"  ✓ {len(rows):,} rows → {CSV_PATH}")
 
     dates = sorted({r["date"] for r in rows})
-    stx = sum(r["gross_revenue"] or 0 for r in rows if r["origin"] == "STX")
-    bfm = sum(r["gross_revenue"] or 0 for r in rows if r["origin"] == "BFM")
+    stx = sum(r["gross_revenue_eur"] or 0 for r in rows if r["origin"] == "STX")
+    bfm = sum(r["gross_revenue_eur"] or 0 for r in rows if r["origin"] == "BFM")
     print(f"  {len(rows):,} rows · {dates[0] if dates else '—'} → {dates[-1] if dates else '—'}"
-          f" · STX ${stx:,.2f} · BFM ${bfm:,.2f} (all USD)")
+          f" · STX €{stx:,.2f} · BFM €{bfm:,.2f} (EUR)")
 
     html = generate_html(rows=rows, sql_text=sql_text,
                          now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))

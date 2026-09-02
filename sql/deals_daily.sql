@@ -1,10 +1,20 @@
--- Deals daily evolution — STX (Seedtag delivery) + BFM (Beachfront), all in USD.
--- STX source amounts are EUR and are converted with the monthly average rate
--- (analytics.currency_rates_monthly: rate_euros = EUR per 1 USD → divide).
--- Window: last 30 closed days (today excluded). Brand (adomain) is part of the
--- BFM grain, but only brands covering 95% of window revenue keep their name —
--- the tail is bucketed into '(other)' to keep the embedded dashboard small
--- (full-brand grain at 90d was 1.2M rows / ~155MB; this is ~130k / ~17MB).
+-- Deals daily evolution — STX (Seedtag delivery) + BFM (Beachfront).
+-- Metrics are carried in LOCAL CURRENCY (_lc: STX currency ∈ EUR/BRL/USD today,
+-- BFM always USD) and converted to EUR (_eur) at the end via the DAILY rate
+-- (business.fx_rates_daily: rate = units of the currency per 1 EUR → DIVIDE
+-- lc / rate). Both _lc and _eur are returned so the
+-- dashboard can toggle. gross_revenue = net_revenue in the source table (the
+-- source's "gross_revenue" is really platform spend).
+-- Window: since 2026-01-01 (today excluded), DAILY grain throughout — viable
+-- once BFM adomain left the grain; the HTML embeds the payload gzipped.
+-- BFM brand (adomain) removed for now — NULL until a curated mapping exists
+-- (it multiplied the grain; see git history for the 95%-coverage version).
+-- HEALTH VIEW: STX base = delivery ∪ Salesforce; the SSP funnel (dcm) only
+-- enriches delivery rows. Deals with funnel activity but no delivery appear
+-- via Salesforce (as "Salesforce only", without funnel metrics); funnel-only
+-- deals outside SF are excluded (dcm covers the whole exchange). BFM
+-- zero-revenue rows come from the source table as-is. first_seen = first date
+-- the deal ever appeared in any source (full history).
 WITH sf AS (
   SELECT
     deal_id,
@@ -57,7 +67,7 @@ dcm AS (
     , sum(ssp_hb_inserts) as hb_inserts
     , sum(impressions) as impressions
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour >= current_date - interval '30' day
+  WHERE date_hour >= date '2026-01-01'
     AND date_hour < current_date  -- closed days only
     AND deal_name IS NOT NULL
   GROUP BY 1, 2, 3
@@ -71,58 +81,58 @@ cur AS (
   GROUP BY 1
 ),
 del AS (
+  -- Local-currency base: the table's gross_revenue is really platform spend;
+  -- net_revenue is our gross revenue.
   SELECT
     dt,
     deal_id,
     salesforce_crm_id,
-    currency,
+    currency,                          -- EUR / BRL / USD today
     max(deal_name)                    AS del_deal_name,
-    round(sum(gross_revenue_eur), 2)  AS gross_revenue_eur,
-    round(sum(net_revenue_eur), 2)    AS net_revenue_eur,
+    round(sum(gross_revenue), 2)      AS platform_spend_lc,
+    round(sum(net_revenue), 2)        AS gross_revenue_lc,
     count(DISTINCT dt)                AS active_days,
-    sum(platform_fee_eur) as platform_fee_eur,
-    sum(post_auction_discount_eur) as post_auction_discount_eur,
-    sum(curator_margin_eur) as curator_margin_total_eur,
-    sum(publisher_cost_eur) as pub_cost_eur
+    sum(platform_fee)                 AS platform_fee_lc,
+    sum(post_auction_discount)        AS post_auction_discount_lc,
+    sum(curator_margin)               AS curator_margin_total_lc,
+    sum(publisher_cost)               AS pub_cost_lc
   FROM big_query_bdb.business.daily_curation_delivery_utc
-  WHERE dt >= current_date - interval '30' day
+  WHERE dt >= date '2026-01-01'
     AND dt < current_date  -- closed days only
   GROUP BY 1, 2, 3, 4
 )
 
-, fx as (
-  -- USD per 1 EUR, per month. fx_latest is the fallback for months the rates
-  -- table doesn't cover yet (better a slightly stale rate than NULL revenue).
-  SELECT date(date) AS month_start, 1 / rate_euros AS usd_per_eur
-  FROM st_datalakehouse.analytics.currency_rates_monthly
-  WHERE currency = 'USD'
-)
-, fx_latest as (
-  SELECT usd_per_eur FROM fx ORDER BY month_start DESC LIMIT 1
-)
-
+-- STX base = delivery ∪ Salesforce (FULL OUTER on sf). dcm is a LEFT JOIN
+-- enrichment only: deals appearing solely in the exchange funnel are excluded
+-- by design (dcm covers the whole exchange, not just curation). Salesforce
+-- deals without delivery show once, dated on the last closed day.
 , stx as (
   SELECT
-    del.dt as date,
-    del.deal_id,
+    coalesce(del.dt, dcm.date, current_date - interval '1' day) as date,
+    coalesce(del.deal_id, dcm.deal_id, sf.deal_id) as deal_id,
     del.salesforce_crm_id,
-    'USD' as currency,
+    del.currency,
     COALESCE(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, '(unnamed)') AS deal_name,
-    'Seedtag' as name_source,
+    case when del.deal_id is null and dcm.deal_id is null
+         then 'Salesforce only' else 'Seedtag' end as name_source,
     CASE
       -- Excepcion explicita (Barbara, 26-ago): el deal LEXUS (Team One) es
       -- Curation agency aunque no empiece por NEUROX ni este en SF.
-      WHEN del.deal_id = '1b21334a-cf38-431e-9723-a45d0620dab9'             THEN 'Curation Agency'
-      WHEN upper(COALESCE(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, ''))
-           LIKE '%TEST%'                                                    THEN 'excluida - test'
-      WHEN upper(del.deal_id) LIKE 'NEUROX%' AND sf.agency LIKE '%Curator%' THEN 'Curation 3rd Party'
-      WHEN upper(del.deal_id) LIKE 'NEUROX%' AND sf.agency IS NOT NULL      THEN 'Curation Agency'
-      WHEN upper(del.deal_id) LIKE 'NEUROX%'                                THEN 'DSP Marketplace'
+      WHEN coalesce(del.deal_id, dcm.deal_id, sf.deal_id)
+           in ('1b21334a-cf38-431e-9723-a45d0620dab9','71dc461d-ed39-4dfe-a1ae-94c3991c8561') THEN 'Curation Agency'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%'
+           AND sf.agency LIKE '%Curator%'                                    THEN 'Curation 3rd Party'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%'
+           AND sf.agency IS NOT NULL                                         THEN 'Curation Agency'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%' THEN 'DSP Marketplace'
+      -- TEST despues de las reglas NEUROX: un deal NEUROX llamado TEST cuenta
+      -- como negocio real; solo los no-NEUROX se excluyen como test.
+      WHEN upper(COALESCE(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, '')) LIKE '%TEST%' THEN 'excluida - test'
       ELSE 'DSP marketplace - Migrated'
     END AS business_line,
     sf.brand,
     sf.agency_group_name,
-    -- new Seedtag agency name from curation metrics; SF short name as fallback
+    -- Seedtag agency name from curation metrics; SF short name as fallback
     coalesce(cur.agency_name, sf.agency) as agency,
     dcm.channel_id,
     sf.dsp,
@@ -134,21 +144,19 @@ del AS (
     sf.am_csm,
     sf.inventory_type,
     sf.format,
-    round(del.gross_revenue_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS platform_spend,
-    round(del.net_revenue_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2)   AS gross_revenue,
-    round(del.pub_cost_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2)      AS pub_cost,
-    round(del.curator_margin_total_eur * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_total,
-    round(del.curator_margin_total_eur * (1 - sf.curator_margin_split)
-          * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_stx,
-    round(del.curator_margin_total_eur * sf.curator_margin_split
-          * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS curator_margin_curator,
+    del.platform_spend_lc,
+    del.gross_revenue_lc,
+    del.pub_cost_lc,
+    del.curator_margin_total_lc,
+    round(del.curator_margin_total_lc * (1 - sf.curator_margin_split), 2) AS curator_margin_stx_lc,
+    round(del.curator_margin_total_lc * sf.curator_margin_split, 2)       AS curator_margin_curator_lc,
+    -- margen desde el gross correcto (net_revenue de la tabla).
     -- coalesce: sin curator margin / discount el margen es gross - pub cost,
-    -- no NULL (NULL se propagaria por la resta). El margen sigue partiendo del
-    -- platform spend (gross_revenue_eur de la tabla), como antes.
-    round((del.gross_revenue_eur
-          - coalesce(del.curator_margin_total_eur * sf.curator_margin_split, 0)
-          - coalesce(del.post_auction_discount_eur, 0)
-          - del.pub_cost_eur) * coalesce(fx.usd_per_eur, fx_latest.usd_per_eur), 2) AS margin,
+    -- no NULL (NULL se propagaria por la resta). Filas sin delivery → NULL.
+    round(del.gross_revenue_lc
+          - coalesce(del.curator_margin_total_lc * sf.curator_margin_split, 0)
+          - coalesce(del.post_auction_discount_lc, 0)
+          - del.pub_cost_lc, 2)     AS margin_lc,
     -- dcm es diario (join por dia): metricas sumables sin deduplicar
     dcm.requests,
     dcm.bids,
@@ -157,12 +165,13 @@ del AS (
     del.active_days,
     sf.sf_product_lines
   FROM del
-  LEFT JOIN sf  ON del.deal_id = sf.deal_id
-  LEFT JOIN dcm ON del.deal_id = dcm.deal_id
-    AND dcm.date = del.dt
-  LEFT JOIN cur ON del.deal_id = cur.deal_id
-  LEFT JOIN fx  ON date_trunc('month', del.dt) = fx.month_start
-  CROSS JOIN fx_latest
+  -- LEFT (no FULL OUTER): dcm cubre todo el exchange; los deals solo-dcm sin
+  -- delivery ni SF no interesan aqui. Coste: un deal de curation con actividad
+  -- SSP pero sin delivery pierde sus metricas de funnel (aparece via SF como
+  -- "Salesforce only").
+  LEFT JOIN dcm ON del.deal_id = dcm.deal_id AND del.dt = dcm.date
+  FULL OUTER JOIN sf  ON coalesce(del.deal_id, dcm.deal_id) = sf.deal_id
+  LEFT JOIN cur ON coalesce(del.deal_id, dcm.deal_id, sf.deal_id) = cur.deal_id
 )
 
 -- Beachfront usa otra convencion de nombres (Swap, dic-2025):
@@ -174,27 +183,7 @@ del AS (
 --   Win rate interno = ads_served/total_bids_placed; externo = impressions/ads_served.
 --   OJO: estas columnas NO son comparables 1:1 con requests/bids/wins de dcm (SSP).
 -- Una sola tabla: ads_served en demand == requests en supply (verificado
--- 26-ago-2026: 3545/3548 deal-dias identicos, diferencia total de 2 requests
--- sobre 75.9M, solo filas basura deal_name='0'). Sin join a supply, sin fan-out.
--- Grano: deal-dia-seat-brand-mediatype (brand con cola agrupada en '(other)').
-, brand_keep as (
-  -- Brands covering 95% of window revenue keep their name; the tail becomes
-  -- '(other)'. Classified over the WHOLE window so a brand never flips between
-  -- its name and '(other)' from one day to the next.
-  select adomain
-  from (
-    select adomain, sum(revenue_gross) tot,
-           sum(sum(revenue_gross)) over (order by sum(revenue_gross) desc
-                                         rows unbounded preceding) as cum,
-           sum(sum(revenue_gross)) over () as grand
-    from st_datalakehouse.analytics.reporting_bfm_demand
-    where business_line in ('Select - BFM','DSP Marketplace - BFM')
-      and date >= current_date - interval '30' day
-      and date < current_date
-    group by adomain
-  )
-  where cum - tot < 0.95 * grand
-)
+-- 26-ago-2026). Grano: deal-dia-seat-mediatype.
 , bfx as (
   select
     a.date
@@ -207,7 +196,8 @@ del AS (
     , 'USD' as currency
     , a.ad_name as deal_name
     , 'Beachfront' as name_source
-    , case when bk.adomain is not null then a.adomain else '(other)' end as brand
+    -- adomain fuera por ahora — brand NULL en BFM
+    , cast(null as varchar) as brand
     , a.clearvu_account as agency_group_name
     , a.clearvu_account as agency
     -- dsp via seat mapping when available: numeric seat names fall back to the
@@ -230,21 +220,20 @@ del AS (
     , cast(null as varchar) as am_csm
     , case when a.media_type = 'Video' then 'CTV' else 'Web' end as inventory_type
     , a.media_type as format
-    , cast(0 as double) as platform_spend
-    , sum(a.revenue_gross) as gross_revenue
-    , sum(a.revenue) as pub_cost
-    , cast(null as double) as curator_margin_total
-    , cast(null as double) as curator_margin_stx
-    , cast(null as double) as curator_margin_curator
+    , cast(0 as double) as platform_spend_lc
+    , sum(a.revenue_gross) as gross_revenue_lc
+    , sum(a.revenue) as pub_cost_lc
+    , cast(null as double) as curator_margin_total_lc
+    , cast(null as double) as curator_margin_stx_lc
+    , cast(null as double) as curator_margin_curator_lc
     -- BFM no tiene curator margin ni post auction discount: margin = gross - pub cost
-    , sum(a.revenue_gross) - sum(a.revenue) as margin
+    , sum(a.revenue_gross) - sum(a.revenue) as margin_lc
     , sum(a.ads_served) as requests
     , sum(a.outgoing_bids) as bids
     , sum(a.total_bids_placed) as wins
     , sum(a.impressions) as impressions
     , cast(null as bigint) as sf_product_lines
   from st_datalakehouse.analytics.reporting_bfm_demand a
-  left join brand_keep bk on bk.adomain = a.adomain
   left join (
       -- ONE row per (seat_id, advertiser): distinct still fans out when a seat
       -- has several seat_names, so collapse with max()
@@ -257,7 +246,7 @@ del AS (
     ) s
       on s.seat_id = a.seat_id and s.advertiser = a.advertiser
   where a.business_line in ('Select - BFM','DSP Marketplace - BFM')
-    and a.date >= current_date - interval '30' day
+    and a.date >= date '2026-01-01'
     and a.date < current_date  -- closed days only
   group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
 )
@@ -266,8 +255,9 @@ del AS (
   SELECT 'STX' AS origin, date, deal_id, salesforce_crm_id, currency, deal_name,
          name_source, business_line, brand, agency_group_name, agency, channel_id,
          dsp, connection_type, seat_id, country_served, country_sold, owner, am_csm,
-         inventory_type, format, platform_spend, gross_revenue, pub_cost,
-         curator_margin_total, curator_margin_stx, curator_margin_curator, margin,
+         inventory_type, format,
+         platform_spend_lc, gross_revenue_lc, pub_cost_lc,
+         curator_margin_total_lc, curator_margin_stx_lc, curator_margin_curator_lc, margin_lc,
          requests, bids, wins, impressions,
          sf_product_lines
   FROM stx
@@ -277,8 +267,9 @@ del AS (
          coalesce(m.channel_label, bfx.dsp) as channel_id,
          bfx.dsp, bfx.connection_type, bfx.seat_id, bfx.country_served, bfx.country_sold,
          bfx.owner, bfx.am_csm,
-         bfx.inventory_type, bfx.format, bfx.platform_spend, bfx.gross_revenue, bfx.pub_cost,
-         bfx.curator_margin_total, bfx.curator_margin_stx, bfx.curator_margin_curator, bfx.margin,
+         bfx.inventory_type, bfx.format,
+         bfx.platform_spend_lc, bfx.gross_revenue_lc, bfx.pub_cost_lc,
+         bfx.curator_margin_total_lc, bfx.curator_margin_stx_lc, bfx.curator_margin_curator_lc, bfx.margin_lc,
          bfx.requests, bfx.bids, bfx.wins, bfx.impressions,
          bfx.sf_product_lines
   FROM bfx
@@ -291,9 +282,47 @@ del AS (
     on bfx.dsp = m.advertiser_key
 )
 
+-- First date each deal EVER appeared in any source (full history, cheap
+-- aggregations) — powers the "new deals" KPI regardless of the window.
+, first_seen as (
+  select deal_id, min(d) as first_seen from (
+    select deal_id, min(date(date_hour)) d
+    from st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
+    where deal_name is not null group by 1
+    union all
+    select deal_id, min(dt) from big_query_bdb.business.daily_curation_delivery_utc group by 1
+    union all
+    select deal_id, min(date) from st_datalakehouse.analytics.reporting_bfm_demand
+    where business_line in ('Select - BFM','DSP Marketplace - BFM') group by 1
+  ) group by 1
+)
+
+-- EUR conversion — DAILY rates from fx_rates_daily. rate = UNITS of the row's
+-- currency per 1 EUR (USD≈1.16, BRL≈6.0, EUR=1.0) → DIVIDE lc / rate.
+-- The table covers every calendar day (weekends included), so the exact-date
+-- join needs no fallback; a missing (currency, day) would show as NULL _eur.
+, rates as (
+  select dt_utc, currency, rate
+  from big_query_bdb.business.fx_rates_daily
+  where dt_utc >= date '2026-01-01'
+)
+
 SELECT
   u.*,
-  -- Pct sobre el total combinado (todo USD).
-  round(100 * gross_revenue / sum(gross_revenue) OVER (), 2) AS pct_of_qtd
+  fs.first_seen,
+  round(u.platform_spend_lc          / r.rate, 2) AS platform_spend_eur,
+  round(u.gross_revenue_lc           / r.rate, 2) AS gross_revenue_eur,
+  round(u.pub_cost_lc                / r.rate, 2) AS pub_cost_eur,
+  round(u.curator_margin_total_lc    / r.rate, 2) AS curator_margin_total_eur,
+  round(u.curator_margin_stx_lc      / r.rate, 2) AS curator_margin_stx_eur,
+  round(u.curator_margin_curator_lc  / r.rate, 2) AS curator_margin_curator_eur,
+  round(u.margin_lc                  / r.rate, 2) AS margin_eur,
+  -- Pct sobre el total combinado, en EUR (las _lc mezclan divisas).
+  round(100 * (u.gross_revenue_lc / r.rate)
+        / sum(u.gross_revenue_lc / r.rate) OVER (), 2) AS pct_of_total
 FROM unioned u
-ORDER BY gross_revenue DESC
+LEFT JOIN first_seen fs ON fs.deal_id = u.deal_id
+LEFT JOIN rates r
+  ON r.currency = u.currency
+  AND r.dt_utc = u.date
+ORDER BY gross_revenue_eur DESC
