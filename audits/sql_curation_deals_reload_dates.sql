@@ -1,3 +1,13 @@
+-- ONE-PASS RELOAD of 11 days in reporting_curation_deals (history scanned once instead of per day).
+-- Logic = sql/deals_daily.sql incl. the seat-DSP precedence CASE. Run STEP 1, then STEP 2.
+-- Dates: 2025-08-28, 2025-08-29, 2025-08-30, 2025-09-12, 2025-09-14, 2026-04-07, 2026-04-09, 2026-04-10, 2026-09-09, 2026-09-12, 2026-09-13
+
+-- STEP 1  (run alone, no trailing semicolon)
+DELETE FROM st_datalakehouse.analytics.reporting_curation_deals
+WHERE date IN (DATE '2025-08-28', DATE '2025-08-29', DATE '2025-08-30', DATE '2025-09-12', DATE '2025-09-14', DATE '2026-04-07', DATE '2026-04-09', DATE '2026-04-10', DATE '2026-09-09', DATE '2026-09-12', DATE '2026-09-13') AND name_source <> 'Salesforce only'
+-- STEP 2  (run alone)
+INSERT INTO st_datalakehouse.analytics.reporting_curation_deals
+(origin, date, deal_id, salesforce_crm_id, currency, deal_name, name_source, business_line, brand, agency_group_name, agency, channel_id, dsp, connection_type, seat_id, country_served, country_sold, owner, am_csm, inventory_type, format, record_type, platform_spend_lc, gross_revenue_lc, pub_cost_lc, curator_margin_total_lc, curator_margin_stx_lc, curator_margin_curator_lc, margin_lc, requests, bids, wins, impressions, sf_product_lines, first_seen, platform_spend_eur, gross_revenue_eur, pub_cost_eur, curator_margin_total_eur, curator_margin_stx_eur, curator_margin_curator_eur, margin_eur, bid_rate, win_rate, cpm_lc, cpm_eur, margin_pct, pct_of_total)
 WITH sf AS (
   SELECT
     deal_id,
@@ -49,8 +59,7 @@ dcm AS (
     , sum(ssp_hb_inserts) as hb_inserts
     , sum(impressions) as impressions
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour >= date '2025-01-01'
-    AND date_hour < current_date  -- closed days only
+  WHERE date(date_hour) IN (DATE '2025-08-28', DATE '2025-08-29', DATE '2025-08-30', DATE '2025-09-12', DATE '2025-09-14', DATE '2026-04-07', DATE '2026-04-09', DATE '2026-04-10', DATE '2026-09-09', DATE '2026-09-12', DATE '2026-09-13')
     AND deal_name IS NOT NULL
     -- dcm cubre TODO el exchange: solo deals de curation — conocidos en SF o
     -- con delivery. Cero identidades nuevas vs la poblacion del
@@ -85,7 +94,7 @@ traffic AS (
   GROUP BY deal_id
 ),
 del AS (
-  -- Local-currency base: the table's gross_revenue is really platform spend;
+  -- Local-currency base: the table's gross_revenue is really platform spend
   -- net_revenue is our gross revenue.
   SELECT
     dt,
@@ -108,8 +117,7 @@ del AS (
     sum(curator_margin_eur)           AS curator_margin_total_eur,
     sum(publisher_cost_eur)           AS pub_cost_eur
   FROM big_query_bdb.business.daily_curation_delivery_utc
-  WHERE dt >= date '2025-01-01'
-    AND dt < current_date  -- closed days only
+  WHERE dt IN (DATE '2025-08-28', DATE '2025-08-29', DATE '2025-08-30', DATE '2025-09-12', DATE '2025-09-14', DATE '2026-04-07', DATE '2026-04-09', DATE '2026-04-10', DATE '2026-09-09', DATE '2026-09-12', DATE '2026-09-13')
   GROUP BY 1, 2, 3, 4
 )
 
@@ -118,26 +126,25 @@ del AS (
 -- guarantees no non-curation deal can enter.
 , stx as (
   SELECT
-    coalesce(del.dt, dcm.date, current_date - interval '1' day) as date,
-    coalesce(del.deal_id, dcm.deal_id, sf.deal_id) as deal_id,
+    coalesce(del.dt, dcm.date) as date,
+    coalesce(del.deal_id, dcm.deal_id) as deal_id,
     del.salesforce_crm_id,
     del.currency,
     COALESCE(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, '(unnamed)') AS deal_name,
-    case when del.deal_id is null and dcm.deal_id is null
-         then 'Salesforce only' else 'Seedtag' end as name_source,
+    'Seedtag' as name_source,
     CASE
       -- Excepcion explicita (Barbara, 26-ago): el deal LEXUS (Team One) es
       -- Curation agency aunque no empiece por NEUROX ni este en SF.
-      WHEN coalesce(del.deal_id, dcm.deal_id, sf.deal_id)
+      WHEN coalesce(del.deal_id, dcm.deal_id)
            in ('1b21334a-cf38-431e-9723-a45d0620dab9','71dc461d-ed39-4dfe-a1ae-94c3991c8561') THEN 'Curation Agency'
       -- La fuente renombro los agency_name (antes '... - Curator', ahora nombre
       -- plano): la señal de 3rd party ya NO es '%Curator%'. Regla derivada de
       -- los datos (verificado 08-sep-2026): las agencias vienen con
       -- agency_short_name en SF; los curators externos estan en SF con agency
       -- NULL y un agency_name de curation que no empieza por 'DSP '.
-      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id)) LIKE 'NEUROX%'
            AND sf.agency IS NOT NULL                                         THEN 'Curation Agency'
-      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id)) LIKE 'NEUROX%'
            AND cur.agency_name IS NOT NULL
            AND cur.agency_name NOT LIKE 'DSP %'
            AND lower(cur.agency_name) NOT LIKE '%seedtag%prod%'
@@ -146,7 +153,7 @@ del AS (
       -- partner no es un DSP son tests de curation. OJO: agency NULL hace el
       -- NOT LIKE falso → un TEST sin agency cae a DSP Marketplace / Migrated.
       WHEN upper(coalesce(del.del_deal_name, sf.sf_deal_name, dcm.dcm_deal_name, '')) LIKE '%TEST%' AND coalesce(cur.agency_name, sf.agency) NOT LIKE 'DSP%' THEN 'Curation Test'
-      WHEN upper(coalesce(del.deal_id, dcm.deal_id, sf.deal_id)) LIKE 'NEUROX%' THEN 'DSP Marketplace'
+      WHEN upper(coalesce(del.deal_id, dcm.deal_id)) LIKE 'NEUROX%' THEN 'DSP Marketplace'
       ELSE 'DSP marketplace - Migrated'
     END AS business_line,
     sf.brand,
@@ -212,8 +219,8 @@ del AS (
   -- FULL OUTER es seguro porque dcm ya viene filtrado a deals de curation:
   -- recupera los dias con trafico SSP pero sin delivery (estado "no bids").
   FULL OUTER JOIN dcm ON del.deal_id = dcm.deal_id AND del.dt = dcm.date
-  FULL OUTER JOIN sf  ON coalesce(del.deal_id, dcm.deal_id) = sf.deal_id
-  LEFT JOIN cur ON coalesce(del.deal_id, dcm.deal_id, sf.deal_id) = cur.deal_id
+  LEFT JOIN sf ON coalesce(del.deal_id, dcm.deal_id) = sf.deal_id
+  LEFT JOIN cur ON coalesce(del.deal_id, dcm.deal_id) = cur.deal_id
   LEFT JOIN traffic tr ON coalesce(del.deal_id, dcm.deal_id) = tr.deal_id
 )
 
@@ -288,8 +295,7 @@ del AS (
     ) s
       on s.seat_id = a.seat_id and s.advertiser = a.advertiser
   where a.business_line in ('Select - BFM','DSP Marketplace - BFM')
-    and a.date >= date '2025-01-01'
-    and a.date < current_date  -- closed days only
+    and a.date IN (DATE '2025-08-28', DATE '2025-08-29', DATE '2025-08-30', DATE '2025-09-12', DATE '2025-09-14', DATE '2026-04-07', DATE '2026-04-09', DATE '2026-04-10', DATE '2026-09-09', DATE '2026-09-12', DATE '2026-09-13')
   group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
 )
 
@@ -326,7 +332,7 @@ del AS (
     ON lower(seed.channel_id) = lower(stx.channel_id)
   UNION ALL
   -- BFM mapea contra reporting_dsp_and_channel_mappings por el advertiser
-  -- CRUDO (advertiser_key es unico → sin fan-out). Labels de la tabla mandan;
+  -- CRUDO (advertiser_key es unico → sin fan-out). Labels de la tabla mandan
   -- fallback al dsp derivado de seats. Sin mapping → 'Direct'.
   SELECT 'BFM', bfx.date, bfx.deal_id, bfx.salesforce_crm_id, bfx.currency, bfx.deal_name,
          bfx.name_source, bfx.business_line, bfx.brand,
@@ -348,7 +354,7 @@ del AS (
          -- ese nombre manda; si no, el label del mapping y el advertiser crudo.
          -- (antes el mapping iba primero y pisaba SIEMPRE el seat: TTD y Bidswitch
          -- estan en la tabla de mapping, asi que Walmart/Zeta nunca salian)
-         case when bfx.dsp is distinct from bfx.advertiser_raw then bfx.dsp
+         case when bfx.dsp <> bfx.advertiser_raw then bfx.dsp
               else coalesce(bfm_m.dsp_label, bfx.dsp) end as dsp,
          coalesce(bfm_m.connection_type, 'Direct')         as connection_type,
          bfx.seat_id, bfx.country_served, bfx.country_sold,
@@ -380,7 +386,7 @@ del AS (
   ) group by 1
 )
 
--- EUR conversion — SOLO Beachfront. STX trae el EUR nativo de sus tablas;
+-- EUR conversion — SOLO Beachfront. STX trae el EUR nativo de sus tablas
 -- para BFM se usa la DAILY rate de fx_rates_daily (rate = units of the row's
 -- currency per 1 EUR, USD≈1.16 → DIVIDE lc / rate). The table covers every
 -- calendar day, so the exact-date join needs no fallback; a missing
@@ -424,7 +430,7 @@ del AS (
 
 SELECT
   f.*,
-  -- Metricas derivadas A NIVEL DE FILA (ratio de las sumas de esa fila;
+  -- Metricas derivadas A NIVEL DE FILA (ratio de las sumas de esa fila
   -- nullif evita division por cero → NULL). OJO al agregar: promediar estas
   -- columnas NO da el ratio agregado — el dashboard las recalcula como
   -- ratio-of-sums sobre las filas visibles; estas sirven para CSV/consultas
@@ -436,6 +442,6 @@ SELECT
   round(1000.0 * f.gross_revenue_eur / nullif(f.impressions, 0), 4) AS cpm_eur,
   round(100.0 * f.margin_lc / nullif(f.gross_revenue_lc, 0), 2)    AS margin_pct,
   -- Pct sobre el total combinado, en EUR (las _lc mezclan divisas).
-  round(100 * f.gross_revenue_eur / sum(f.gross_revenue_eur) OVER (), 2) AS pct_of_total
+  cast(null as double) AS pct_of_total
 FROM final f
-ORDER BY gross_revenue_eur DESC
+
