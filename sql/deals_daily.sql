@@ -201,6 +201,12 @@ del AS (
           - coalesce(del.curator_margin_total_eur * sf.curator_margin_split, 0)
           - coalesce(del.post_auction_discount_eur, 0)
           - del.pub_cost_eur, 2)    AS margin_eur,
+    -- reported = the same figures on the Seedtag side (no separate "reported"
+    -- source exists for STX); Beachfront rows take closing's in the BFM branch
+    del.gross_revenue_lc  AS reported_gross_revenue_lc,
+    del.pub_cost_lc       AS reported_pub_cost_lc,
+    del.gross_revenue_eur AS reported_gross_revenue_eur,
+    del.pub_cost_eur      AS reported_pub_cost_eur,
     -- dcm es diario (join por dia): metricas sumables sin deduplicar
     dcm.requests,
     dcm.bids,
@@ -217,6 +223,21 @@ del AS (
   LEFT JOIN traffic tr ON coalesce(del.deal_id, dcm.deal_id) = tr.deal_id
 )
 
+-- Reported figures for Beachfront = what closing reports: revenue net of Select
+-- fees + the pro-rated Ent Aggregator subtraction, and publisher_cost. Closing is
+-- finer than bfx (x dsp x channel x country x category x adomain), so it is
+-- summed to the bfx grain (deal-day x seat) FIRST — joining raw rows inflates
+-- ~4x. seat_id can be NULL on both sides → sentinel key. 452 seat-days carry two
+-- bfx rows (two clearvu accounts): both get the seat-day amount, an accepted
+-- +0.019% overcount. Verified 2026-09-16 (audits/sql_curation_deals_reported_cols.sql).
+, closing_rep as (
+  select date, deal_id, deal_name, coalesce(seat_id, '∅') as seat_key,
+         sum(revenue) as rep_rev, sum(publisher_cost) as rep_cost
+  from st_datalakehouse.analytics.reporting_closing_bfm_demand
+  where business_line in ('Select - BFM', 'DSP Marketplace - BFM')
+    and date >= date '2025-01-01'
+  group by 1, 2, 3, 4
+)
 , bfx as (
   select
     a.date
@@ -319,6 +340,7 @@ del AS (
          curator_margin_total_lc, curator_margin_stx_lc, curator_margin_curator_lc, margin_lc,
          platform_spend_eur, gross_revenue_eur, pub_cost_eur,
          curator_margin_total_eur, curator_margin_stx_eur, curator_margin_curator_eur, margin_eur,
+         reported_gross_revenue_lc, reported_pub_cost_lc, reported_gross_revenue_eur, reported_pub_cost_eur,
          requests, bids, wins, impressions,
          sf_product_lines, record_type
   FROM stx
@@ -358,11 +380,20 @@ del AS (
          bfx.curator_margin_total_lc, bfx.curator_margin_stx_lc, bfx.curator_margin_curator_lc, bfx.margin_lc,
          bfx.platform_spend_eur, bfx.gross_revenue_eur, bfx.pub_cost_eur,
          bfx.curator_margin_total_eur, bfx.curator_margin_stx_eur, bfx.curator_margin_curator_eur, bfx.margin_eur,
+         round(cr.rep_rev, 2)  as reported_gross_revenue_lc,
+         round(cr.rep_cost, 2) as reported_pub_cost_lc,
+         cast(null as double)  as reported_gross_revenue_eur,   -- EUR at the end via rates
+         cast(null as double)  as reported_pub_cost_eur,
          bfx.requests, bfx.bids, bfx.wins, bfx.impressions,
          bfx.sf_product_lines, bfx.record_type
   FROM bfx
   LEFT JOIN st_datalakehouse.analytics.reporting_dsp_and_channel_mappings bfm_m
     ON bfm_m.advertiser_key = bfx.advertiser_raw
+  LEFT JOIN closing_rep cr
+    ON  cr.date      = bfx.date
+    AND cr.deal_id   = bfx.deal_id
+    AND cr.deal_name = bfx.deal_name
+    AND cr.seat_key  = coalesce(bfx.seat_id, '∅')
 )
 
 -- First date each deal EVER appeared in any source (full history, cheap
@@ -412,7 +443,11 @@ del AS (
     coalesce(u.curator_margin_total_eur,   round(u.curator_margin_total_lc   / r.rate, 2)) AS curator_margin_total_eur,
     coalesce(u.curator_margin_stx_eur,     round(u.curator_margin_stx_lc     / r.rate, 2)) AS curator_margin_stx_eur,
     coalesce(u.curator_margin_curator_eur, round(u.curator_margin_curator_lc / r.rate, 2)) AS curator_margin_curator_eur,
-    coalesce(u.margin_eur,                 round(u.margin_lc                 / r.rate, 2)) AS margin_eur
+    coalesce(u.margin_eur,                 round(u.margin_lc                 / r.rate, 2)) AS margin_eur,
+    u.reported_gross_revenue_lc,
+    u.reported_pub_cost_lc,
+    coalesce(u.reported_gross_revenue_eur, round(u.reported_gross_revenue_lc / r.rate, 2)) AS reported_gross_revenue_eur,
+    coalesce(u.reported_pub_cost_eur,      round(u.reported_pub_cost_lc      / r.rate, 2)) AS reported_pub_cost_eur
   FROM unioned u
   LEFT JOIN first_seen fs ON fs.deal_id = u.deal_id
   -- rate SOLO para Beachfront: STX usa el EUR nativo de sus tablas
