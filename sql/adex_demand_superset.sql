@@ -69,6 +69,23 @@ bfm_map AS (
     GROUP BY 1
 ),
 
+-- Beachfront's UNADJUSTED gross per deal-day. closing.revenue is net of the
+-- Select fee adjustments and the pro-rated Ent Aggregator subtraction; adex
+-- reports what Beachfront reports, so the revenue VALUE comes from
+-- reporting_bfm_demand while every resolved dimension (dsp via the seat table,
+-- channel, country, category, connection type) still comes from closing.
+-- Verified 2026-09-17 on 2026-09-16: the BFM branch totals Beachfront's gross to
+-- the cent ($69,127.06) for every deal-day closing carries; gross ~6% above net.
+bfm_gross AS (
+    SELECT date, deal_id, ad_name AS deal_name, sum(revenue_gross) AS gross
+    FROM st_datalakehouse.analytics.reporting_bfm_demand
+    WHERE business_line IN ('Open Auction - BFM', 'PMP - Seedtag',
+                            'Select - BFM', 'DSP Marketplace - BFM')
+      AND date >= current_date - interval '10' day   -- <<WINDOW>>
+      AND date < current_date   -- <<WINDOW>>
+    GROUP BY 1, 2, 3
+),
+
 consolidated_raw AS (
     SELECT
         CAST(r.date AS date) AS date,
@@ -167,13 +184,23 @@ consolidated_raw AS (
             a.publisher_country,
             a.product_category,
             a.connection_type,
-            a.revenue AS revenue_gross,
+            CASE
+                WHEN g.gross IS NULL THEN a.revenue
+                WHEN sum(a.revenue) OVER (PARTITION BY a.date, a.deal_id, a.deal_name) <> 0
+                    THEN g.gross * a.revenue
+                         / sum(a.revenue) OVER (PARTITION BY a.date, a.deal_id, a.deal_name)
+                ELSE g.gross / count(*) OVER (PARTITION BY a.date, a.deal_id, a.deal_name)
+            END AS revenue_gross,
             a.total_impressions,
             a.total_response_bids
         FROM st_datalakehouse.analytics.reporting_closing_bfm_demand a
         LEFT JOIN bfm_map bfm_m
             ON bfm_m.advertiser_key = a.dsp_group_name
         LEFT JOIN curation_bl cbl ON cbl.deal_id_lc = lower(a.deal_id)
+        LEFT JOIN bfm_gross g
+            ON  g.date      = a.date
+            AND g.deal_id   = a.deal_id
+            AND g.deal_name IS NOT DISTINCT FROM a.deal_name
         WHERE a.business_line IN ('Open Auction - BFM', 'PMP - Seedtag',
                                   'Select - BFM', 'DSP Marketplace - BFM')
           AND NOT (a.business_line = 'Open Auction - BFM'
