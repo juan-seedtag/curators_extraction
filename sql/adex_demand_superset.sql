@@ -28,47 +28,15 @@
 --     reporting_curation_deals.
 --
 -- SINGLE DAY vs WINDOW
---   The loader runs this ONE DAY AT A TIME (DELETE that day, then INSERT).
---   I widened the four date bounds into a window. That is safe because `date`
---   is column 1 of every GROUP BY in the query, so each day still aggregates
---   independently. Edit the four lines tagged <<WINDOW>> to change the range.
---   Default below is 2026-09-01 (inclusive) to 2026-09-11 (exclusive).
---   Keep them as literal timestamps so Trino can prune partitions.
---
--- BEFORE YOU RUN IT IN SUPERSET
---   * Only the st_datalakehouse catalog is needed. Unlike the curation query,
---     this one touches no big_query_bdb table, so catalog access is not an issue.
---   * stg_ssp_responses_daily carries roughly 365 million rows PER DAY. The
---     10-day default is already a large scan; widen it deliberately, not by
---     reflex. The full table history is about 11.2 million output rows.
---   * No Jinja and no trailing semicolon, so Superset can append its LIMIT.
---
--- VERIFIED 2026-09-14 — re-running this file does NOT byte-reproduce the table
---   Ran this query over 2026-09-09..09-10 and diffed against production:
---     revenue_gross   identical to the cent (962,507.36 and 1,006,736.25)
---     impressions     identical (743,285,464 and 726,707,455)
---     row count       80-100 fewer rows per day
---   The whole difference sits in ONE pair of labels. For 2026-09-10:
---     DSP Marketplace            +54 rows   +853.99 USD
---     DSP marketplace - Migrated -135 rows  -853.99 USD
---     every other business_line   0 rows     0.00 USD
---   Cause: curation_bl below is a RUN-TIME lookup. The label a deal gets
---   depends on reporting_curation_deals as it stands the moment you execute,
---   not as it stood when the loader wrote that day. Between the load and this
---   test some deals' latest label moved, so historical rows regrouped and
---   merged (which is why rows drop while money does not).
---   Consequence: totals are reproducible, the Marketplace-vs-Migrated split is
---   not. Do not treat a re-run as an audit of the table.
---
--- LABEL SEMANTICS (per-origin lookup, 2026-09-15)
---   curation_bl resolves ONE label PER ORIGIN with max_by(business_line, date):
---   bl_stx for the STX branch, bl_bfm for the BFM branch. 'DSP marketplace -
---   Migrated' is a Seedtag-side label only; Beachfront rows of a migrated deal
---   stay 'DSP Marketplace'. Labels are AS-OF-LATEST, not as-of-date: every
---   historical row of a deal carries that deal's CURRENT label of its origin.
---   Totals are right; a historical label split is only as good as the latest
---   label. (Before 2026-09-15 a single lookup stamped 'Migrated' on Beachfront
---   rows back to 2025 — fixed.)
+--   The loader runs one day at a time ({d}); here the four bounds tagged
+--   <<WINDOW>> are a RELATIVE 10-day window, `current_date - interval '10' day`
+--   to `current_date` (exclusive, so it ends on the last closed day). Relative
+--   on purpose: a hardcoded range silently goes stale — this file sat at
+--   2026-09-01..09-11 and was missing five loaded days when checked on
+--   2026-09-17. Widening `date` is safe (it is the partition column and the two
+--   branches are filtered independently), but keep it modest:
+--   stg_ssp_responses_daily holds ~430M rows PER DAY. To pin an exact range for
+--   a comparison, replace the four tagged lines with explicit timestamps.
 --
 -- COLUMNS RETURNED (loader INSERT order)
 --   date, dsp_group_name, connection_type, business_line, product_category, publisher_country, clearvu_account, channel_id, revenue_gross, total_impressions, total_response_bids
@@ -157,8 +125,8 @@ consolidated_raw AS (
     LEFT JOIN curation_bl cbl ON cbl.deal_id_lc = lower(r.deal_id)
     -- NO Beachfront/SpringServe exclusion: BFM traffic with a Seedtag leg is
     -- measured here (SSP responses) in this table.
-    WHERE r.date >= timestamp '2026-09-01 00:00:00'   -- <<WINDOW>>
-      AND r.date < timestamp '2026-09-11 00:00:00'   -- <<WINDOW>>
+    WHERE r.date >= current_date - interval '10' day   -- <<WINDOW>>
+      AND r.date < current_date   -- <<WINDOW>>
     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
 
     UNION ALL
@@ -214,8 +182,8 @@ consolidated_raw AS (
           -- out for the external/managed branch, which this unified table no
           -- longer has — excluding them here would drop them entirely
           -- (decided sep-2026).
-          AND a.date >= timestamp '2026-09-01 00:00:00'   -- <<WINDOW>>
-          AND a.date < timestamp '2026-09-11 00:00:00'   -- <<WINDOW>>
+          AND a.date >= current_date - interval '10' day   -- <<WINDOW>>
+          AND a.date < current_date   -- <<WINDOW>>
     ) bfm
     GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
 )
