@@ -39,8 +39,11 @@
 --     reporting_curation_deals.
 --   * inventory_type is part of the grain (added 2026-09-18): taken from the
 --     source on both STX branches, derived from media_type on BFM
---     (Display -> Display, everything else -> CTV). The legacy STX source
---     never populated it, so it is NULL for every pre-June-2025 STX row.
+--     On STX: source_type 'Beachfront' -> CTV, inventory_type 'APP' -> App,
+--     everything else -> Web. On BFM: derived from media_type (Display ->
+--     Display, everything else -> CTV). The legacy STX source never
+--     populated inventory_type, but its rows fall to the ELSE and come out
+--     'Web', so no row is NULL.
 --
 -- SINGLE DAY vs WINDOW
 --   The loader runs this one day at a time. Here the six lines marked
@@ -138,7 +141,13 @@ consolidated_raw AS (
                 THEN 'Direct'
             ELSE COALESCE(seed.connection_type, 'Reseller')
         END AS connection_type,
-        r.inventory_type,
+        -- inventory_type: Beachfront-sourced SSP traffic is CTV regardless of
+        -- what the inventory flag says; everything else is App or Web.
+        CASE
+            WHEN r.source_type = 'Beachfront' THEN 'CTV'
+            WHEN r.inventory_type = 'APP' THEN 'App'
+            ELSE 'Web'
+        END AS inventory_type,
         SUM(r.net_imp_paid) / 1000.0 AS revenue_gross,
         SUM(r.total_impressions) AS total_impressions,
         SUM(r.total_response_bids) AS total_response_bids
@@ -209,9 +218,16 @@ consolidated_raw AS (
             WHEN s.channel_id IN ('RtbHouse', 'TheTradeDesk', 'Outbrain', 'StackAdaptDSP', 'Nexxen',
                     'Opera', 'NextRollPAAPI', 'Viant', 'Beeswax', 'Illumin', 'DeepIntent', 'Deepintent') THEN 'Direct'
         END AS connection_type,
-        -- this source never populated inventory_type: NULL for every row of its
-        -- 2025-01-01..2025-05-31 range. Passed through rather than invented.
-        s.inventory_type,
+        -- same rule as the modern branch. This source never populated
+        -- inventory_type (NULL for its whole 2025-01-01..2025-05-31 range), so
+        -- every row falls to the ELSE and comes out 'Web' rather than NULL.
+        -- Beachfront-sourced SSP traffic is CTV regardless of
+        -- what the inventory flag says; everything else is App or Web.
+        CASE
+            WHEN s.source_type = 'Beachfront' THEN 'CTV'
+            WHEN s.inventory_type = 'APP' THEN 'App'
+            ELSE 'Web'
+        END AS inventory_type,
         SUM(s.ssp_net_imp_paid) / 1000.0 AS revenue_gross,
         SUM(s.ssp_impressions) AS total_impressions,
         SUM(s.ssp_bids) AS total_response_bids
