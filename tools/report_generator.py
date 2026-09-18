@@ -50,7 +50,8 @@ def _pack(rows: list[dict]) -> str:
                       default=str, ensure_ascii=False)
 
 
-def generate_html(*, rows: list[dict], sql_text: str, now: str) -> str:
+def generate_html(*, rows: list[dict], sql_text: str, now: str,
+                  grain_info: dict | None = None) -> str:
     # The packed JSON is embedded gzipped+base64 and inflated in the browser
     # with the native DecompressionStream — ~10x smaller file, same content.
     packed = _pack(rows).encode("utf-8")
@@ -59,6 +60,7 @@ def generate_html(*, rows: list[dict], sql_text: str, now: str) -> str:
     for token, value in {
         "__ROWS_B64__": b64,
         "__SQL_JSON__": json.dumps(sql_text, ensure_ascii=False),
+        "__GRAIN_JSON__": json.dumps(grain_info or {"daily_from": None, "weekly_from": None}),
         "__NOW__": now,
     }.items():
         html = html.replace(token, value)
@@ -120,12 +122,12 @@ html[data-theme="dark"] #theme-toggle .icon-moon{display:inline}
 
 /* KPI cards — clickable state filters */
 .kpi-row{display:flex;gap:12px;margin-bottom:22px;flex-wrap:wrap}
-.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;min-width:170px;flex:1}
+.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;min-width:170px;flex:1;text-align:center}
 .kpi-card.clickable{cursor:pointer;transition:border-color 120ms, box-shadow 120ms}
 .kpi-card.clickable:hover{border-color:var(--accent)}
 .kpi-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .kpi-card .kpi-label{font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
-.kpi-card .kpi-value{font-size:26px;font-weight:700;color:var(--kpi-strong);margin-top:2px;font-variant-numeric:tabular-nums}
+.kpi-card .kpi-value{font-size:26px;font-weight:700;color:var(--kpi-strong);margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi-card .kpi-sub{font-size:12px;color:var(--text-subtle);margin-top:2px}
 
 /* health matrix */
@@ -175,6 +177,7 @@ tr.drill-row>td{background:var(--surface-2);padding:0}
 .chip.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:0}
 .dot-mon{background:#1A7F37}.dot-nobid{background:#F4D56D}.dot-noreq{background:#CF222E}
+.dot-noimp{background:#CF222E}
 .dot-dark{background:#8D8A89}.dot-new{background:#5476FF}.dot-act{background:#67C8FE}
 
 /* pickers */
@@ -194,8 +197,20 @@ tr.drill-row>td{background:var(--surface-2);padding:0}
 .tooltip.sql{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
 .tooltip .copy-hint{display:block;margin-top:8px;color:var(--text-subtle);font-family:'Instrument Sans',sans-serif;font-size:11px}
 
-/* filters — sticky so they are visible while scrolling */
-#filters-card{position:sticky;top:8px;z-index:5000;box-shadow:0 6px 18px rgba(0,0,0,.10)}
+/* filters — flow with the page (no sticky, no collapse) */
+#filters-card{position:static}
+/* view selector — two big cards that pick which table (and which setup) is shown */
+.view-switch{display:flex;gap:14px;margin-bottom:22px;flex-wrap:wrap}
+.view-card{flex:1;min-width:260px;display:flex;align-items:center;gap:14px;background:var(--surface);
+  border:1px solid var(--border);border-radius:12px;padding:16px 20px;cursor:pointer;
+  transition:border-color 120ms, box-shadow 120ms, background 120ms}
+.view-card:hover{border-color:var(--accent)}
+.view-card.active{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);background:var(--surface-2)}
+.view-card .vsw-icon{font-size:30px;line-height:1}
+.view-card .vsw-title{font-size:17px;font-weight:700;color:var(--kpi-strong)}
+.view-card .vsw-sub{font-size:12px;color:var(--text-subtle);margin-top:3px}
+/* tables get a viewport of their own instead of growing the page forever */
+.tbl-scroll{max-height:560px;overflow:auto}
 .filter-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px 14px}
 .filter-item{display:flex;flex-direction:column;gap:4px;min-width:0}
 .filter-item .ms-trigger{width:100%}
@@ -211,15 +226,20 @@ tr.drill-row>td{background:var(--surface-2);padding:0}
 .ms-trigger.active-filter{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .ms-dropdown{display:none;position:absolute;top:calc(100% + 4px);left:0;min-width:260px;max-width:340px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.15);z-index:10001;max-height:380px;flex-direction:column}
 .ms-dropdown.open{display:flex}
-.ms-search{padding:8px;border-bottom:1px solid var(--border)}
-.ms-search input{width:100%;padding:6px 8px;background:var(--surface-2);border:1px solid var(--border);border-radius:5px;font-size:12px;color:var(--text);outline:none}
+.ms-search{padding:8px;border-bottom:1px solid var(--border);position:relative}
+.ms-search input{width:100%;padding:6px 26px 6px 8px;background:var(--surface-2);border:1px solid var(--border);border-radius:5px;font-size:12px;color:var(--text);outline:none}
+.ms-search .ms-x{position:absolute;right:14px;top:50%;transform:translateY(-50%);border:none;background:transparent;color:var(--text-subtle);cursor:pointer;font-size:12px;line-height:1;padding:2px;display:none}
+.ms-search .ms-x.show{display:block}
+.ms-search .ms-x:hover{color:var(--accent)}
 .ms-options{overflow-y:auto;padding:4px 0;flex:1}
 .ms-option{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:13px}
 .ms-option:hover{background:var(--surface-2)}
 .ms-option input{accent-color:var(--accent);flex-shrink:0}
 .ms-option span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ms-footer{padding:8px;border-top:1px solid var(--border);display:flex;justify-content:flex-end}
-.ms-footer button{padding:5px 14px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:5px;font-size:12px;cursor:pointer}
+.ms-footer{padding:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.ms-footer .ms-count{font-size:11px;color:var(--text-subtle);white-space:nowrap}
+.ms-footer .ms-btns{display:flex;gap:6px}
+.ms-footer button{padding:5px 10px;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:5px;font-size:12px;cursor:pointer;white-space:nowrap}
 .ms-footer button:hover{border-color:var(--accent);color:var(--accent)}
 
 /* table */
@@ -280,7 +300,7 @@ footer.report-footer svg{opacity:.75}
 <div class="page">
 
 <div class="note-banner">💶 <strong>Currency:</strong> toggle EUR ⇄ local currency below — EUR uses monthly average rates (currency_rates_monthly); local mixes EUR/BRL/USD in totals.
-&nbsp;·&nbsp; Daily granularity since 2026-01-01. &nbsp;·&nbsp; Deal-days with SSP activity but no delivery revenue are included (money shows —).
+&nbsp;·&nbsp; Granularity: DAILY for the last 60 days, WEEKLY for the rest of 2026, MONTHLY for 2025 (rows dated on the bucket's first day). &nbsp;·&nbsp; Deal-days with SSP activity but no delivery revenue are included (money shows —).
 &nbsp;·&nbsp; BFM funnel naming differs from STX — see the <span class="info-icon" style="vertical-align:-4px" onclick="toggleTooltip(event,'funnel-tip')">i</span> tooltip.
 &nbsp;·&nbsp; BFM brands covering 95% of revenue keep their name; the tail shows as '(other)'.
 <div class="tooltip" id="funnel-tip">Beachfront uses a different funnel naming convention (Swap, Dec-2025):
@@ -297,7 +317,6 @@ Deal states (new / no bids / monetizing / went dark) are computed per origin wit
 <div class="card" id="filters-card">
   <div class="card-header">🔎 Filters <span class="muted" style="font-weight:400">— pick the partner (curator) first · options cascade · sorted by revenue</span>
     <span class="muted" id="filters-summary" style="font-weight:600"></span>
-    <button class="mini-btn" id="filters-toggle" onclick="toggleFilters()">▲ Hide</button>
     <div class="spacer"></div>
     <span class="flabel">Currency</span>
     <button class="seg-btn cur-btn active" data-cur="eur" onclick="setCurMode('eur')">EUR</button>
@@ -320,6 +339,22 @@ Deal states (new / no bids / monetizing / went dark) are computed per origin wit
       </div>
     </div>
     <button class="mini-btn" onclick="clearAllFilters()">Clear all</button>
+    <div class="ms-wrap">
+      <div class="ms-trigger" id="views-trigger" onclick="viewsToggle(event)" style="min-width:130px">
+        <span class="ms-label" id="views-label">⭐ Views</span><span class="ms-arrow">▼</span>
+      </div>
+      <div class="ms-dropdown" id="views-dd" style="min-width:300px" onclick="event.stopPropagation()">
+        <div class="ms-options" id="views-list"></div>
+        <div class="ms-footer" style="flex-direction:column;align-items:stretch;gap:8px">
+          <input class="email-box" id="view-name" placeholder="Name this view…" style="min-width:0;font-size:12px;padding:6px 10px">
+          <span class="ms-btns" style="display:flex;justify-content:space-between">
+            <button onclick="viewSave(event)">💾 Save current view</button>
+            <button onclick="viewShare(event)" title="Copy a link that opens the dashboard with the current view applied">🔗 Copy link</button>
+          </span>
+          <span class="muted" id="views-sync" style="font-size:10px"></span>
+        </div>
+      </div>
+    </div>
   </div>
   <div id="filters-body">
     <div class="curator-row" id="filter-curator"></div>
@@ -343,11 +378,26 @@ Deal states (new / no bids / monetizing / went dark) are computed per origin wit
 </div>
 
 <div class="card">
+  <div class="card-header">🆕 New deals by owner
+    <span class="muted" style="font-weight:400">— deals first seen each week (week starts Monday) · respects filters & date range</span>
+    <div class="spacer"></div>
+    <button class="mini-btn" id="nd-toggle" onclick="toggleNewDeals()">▲ Hide</button>
+  </div>
+  <div id="nd-body">
+    <div class="table-wrapper"><table id="nd-table"><thead id="nd-head"></thead><tbody id="nd-tbody"></tbody></table></div>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-header">📈 Evolution
     <span class="muted" style="font-weight:400">— daily, respects filters & state selection</span>
     <div class="spacer"></div>
     <span class="flabel">Metric</span>
     <select class="sel-box" id="chart-metric" onchange="buildChart()"></select>
+    <span class="flabel" style="margin-left:8px">Grain</span>
+    <button class="seg-btn active cgb" data-g="day" onclick="setChartGran('day')">Day</button>
+    <button class="seg-btn cgb" data-g="week" onclick="setChartGran('week')">Week</button>
+    <button class="seg-btn cgb" data-g="month" onclick="setChartGran('month')">Month</button>
     <span class="flabel" style="margin-left:8px">Chart</span>
     <button class="seg-btn active" id="ct-bar" onclick="setChartType('bar')">Bars</button>
     <button class="seg-btn" id="ct-line" onclick="setChartType('line')">Lines</button>
@@ -365,7 +415,20 @@ Deal states (new / no bids / monetizing / went dark) are computed per origin wit
   <div class="chart-legend" id="chart-legend"></div>
 </div>
 
-<div class="card">
+<div class="view-switch">
+  <div class="view-card active" id="vsw-details" onclick="setTableTab('details')">
+    <div class="vsw-icon">📋</div>
+    <div><div class="vsw-title">Details</div>
+         <div class="vsw-sub">row-level table — choose fields &amp; metrics</div></div>
+  </div>
+  <div class="view-card" id="vsw-evo" onclick="setTableTab('evo')">
+    <div class="vsw-icon">📈</div>
+    <div><div class="vsw-title">Evolution</div>
+         <div class="vsw-sub">periods as columns — choose segments &amp; metrics</div></div>
+  </div>
+</div>
+
+<div class="card" id="cfg-details">
   <div class="card-header">🧩 Build your view
     <span class="muted" style="font-weight:400">— fields = table grain (date always included); metrics are SUM-aggregated
       <span class="info-icon" style="vertical-align:-4px;margin-left:4px" onclick="toggleTooltip(event,'metric-tip')">i</span>
@@ -392,17 +455,46 @@ Deal states (new / no bids / monetizing / went dark) are computed per origin wit
   </div>
 </div>
 
+<div class="card" id="cfg-evo" style="display:none">
+  <div class="card-header">🧩 Build your evolution
+    <span class="muted" style="font-weight:400">— segments become rows, periods become columns; derived metrics are ratio-of-sums per period</span>
+  </div>
+  <div class="picker-grid">
+    <div>
+      <div class="flabel" style="margin-bottom:8px">Segments (rows — max 2)</div>
+      <div class="picker-opts" id="evd-rowbtns"></div>
+    </div>
+    <div>
+      <div class="flabel" style="margin-bottom:8px">Metrics (max 3)</div>
+      <div class="picker-opts" id="evd-metbtns"></div>
+      <div class="picker-actions">
+        <span class="flabel" style="align-self:center">Grain</span>
+        <select class="sel-box" id="evd-gran" onchange="evdSetGran(this.value)">
+          <option value="day">Daily</option><option value="week">Weekly</option>
+          <option value="month" selected>Monthly</option><option value="quarter">Quarterly</option>
+        </select>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="card">
   <div class="card-header">📋 Deals
-    <span class="muted" style="font-weight:400">— click ▸ on any row to see its full-window evolution</span>
+    <span class="muted" style="font-weight:400" id="tbl-hint">— click ▸ on any row to see its full-window evolution</span>
     <span id="state-chips"></span>
     <div class="spacer"></div>
     <input class="email-box" id="email-to" type="email" placeholder="colleague@seedtag.com">
     <button class="btn-csv" onclick="prepareEmail()">✉️ Prepare email</button>
-    <button class="btn-csv" onclick="tableCSV()">📥 Download CSV</button>
+    <button class="btn-csv" id="csv-btn" onclick="tableCSV()">📥 Download CSV</button>
   </div>
-  <div class="table-wrapper"><table><thead id="tbl-head"></thead><tbody id="tbl-body"></tbody></table></div>
-  <div class="table-meta"><span class="count" id="tbl-count"></span><div class="pagination" id="tbl-pag"></div></div>
+  <div id="pane-details">
+    <div class="table-wrapper tbl-scroll"><table><thead id="tbl-head"></thead><tbody id="tbl-body"></tbody></table></div>
+    <div class="table-meta"><span class="count" id="tbl-count"></span><div class="pagination" id="tbl-pag"></div></div>
+  </div>
+  <div id="pane-evo" style="display:none">
+    <div class="table-wrapper tbl-scroll"><table><thead id="evd-head"></thead><tbody id="evd-body"></tbody></table></div>
+    <div class="table-meta"><span class="count" id="evd-count"></span></div>
+  </div>
 </div>
 
 </div>
@@ -432,10 +524,103 @@ function unpack(p){
 // (any modern browser). Everything data-dependent initializes in boot().
 const ROWS_B64="__ROWS_B64__";
 const SQL_TEXT=__SQL_JSON__;
+const GRAIN=__GRAIN_JSON__;
+// Pure-JS gzip inflate fallback (puff-style) — used when DecompressionStream is
+// unavailable or blocked (e.g. the Apps Script iframe sandbox). Slower but correct.
+function gunzipJS(src){
+  let p=10; const flg=src[3];
+  if(flg&4){p+=2+(src[p]|src[p+1]<<8);}
+  if(flg&8){while(src[p++]!==0);}
+  if(flg&16){while(src[p++]!==0);}
+  if(flg&2){p+=2;}
+  let out=new Uint8Array(1<<22), olen=0;
+  const ensure=n=>{ if(olen+n>out.length){ let s=out.length; while(olen+n>s)s*=2; const t=new Uint8Array(s); t.set(out.subarray(0,olen)); out=t; } };
+  let bitbuf=0,bitcnt=0;
+  const bits=n=>{ while(bitcnt<n){bitbuf|=src[p++]<<bitcnt;bitcnt+=8;} const v=bitbuf&((1<<n)-1); bitbuf>>>=n; bitcnt-=n; return v; };
+  function buildHuff(lengths){
+    const count=new Array(16).fill(0); for(const l of lengths)count[l]++;
+    count[0]=0;
+    const offs=new Array(16).fill(0);
+    for(let i=1;i<16;i++)offs[i]=offs[i-1]+count[i-1];
+    const symbol=new Array(lengths.length);
+    lengths.forEach((l,s)=>{if(l)symbol[offs[l]++]=s;});
+    return {count,symbol};
+  }
+  function decode(h){
+    let code=0,first=0,index=0;
+    for(let len=1;len<16;len++){
+      code|=bits(1);
+      const c=h.count[len];
+      if(code-first<c)return h.symbol[index+(code-first)];
+      index+=c; first=(first+c)<<1; code<<=1;
+    }
+    throw new Error('bad huffman code');
+  }
+  const LBASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const LEXT=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const DBASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  const DEXT=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  let fixedL=null,fixedD=null;
+  for(;;){
+    const last=bits(1), type=bits(2);
+    if(type===0){
+      bitbuf=0;bitcnt=0;
+      const len=src[p]|src[p+1]<<8; p+=4;
+      ensure(len); out.set(src.subarray(p,p+len),olen); olen+=len; p+=len;
+    }else{
+      let hl,hd;
+      if(type===1){
+        if(!fixedL){
+          const l=new Array(288);
+          for(let i=0;i<144;i++)l[i]=8; for(let i=144;i<256;i++)l[i]=9;
+          for(let i=256;i<280;i++)l[i]=7; for(let i=280;i<288;i++)l[i]=8;
+          fixedL=buildHuff(l); fixedD=buildHuff(new Array(30).fill(5));
+        }
+        hl=fixedL; hd=fixedD;
+      }else{
+        const hlit=bits(5)+257, hdist=bits(5)+1, hclen=bits(4)+4;
+        const ord=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+        const cl=new Array(19).fill(0);
+        for(let i=0;i<hclen;i++)cl[ord[i]]=bits(3);
+        const clh=buildHuff(cl);
+        const lens=[];
+        while(lens.length<hlit+hdist){
+          const s=decode(clh);
+          if(s<16)lens.push(s);
+          else if(s===16){const prev=lens[lens.length-1];let n=bits(2)+3;while(n--)lens.push(prev);}
+          else if(s===17){let n=bits(3)+3;while(n--)lens.push(0);}
+          else {let n=bits(7)+11;while(n--)lens.push(0);}
+        }
+        hl=buildHuff(lens.slice(0,hlit)); hd=buildHuff(lens.slice(hlit));
+      }
+      for(;;){
+        const s=decode(hl);
+        if(s<256){ensure(1);out[olen++]=s;}
+        else if(s===256)break;
+        else{
+          const li=s-257, len=LBASE[li]+bits(LEXT[li]);
+          const ds=decode(hd), dist=DBASE[ds]+bits(DEXT[ds]);
+          ensure(len);
+          let from=olen-dist;
+          for(let i=0;i<len;i++)out[olen++]=out[from++];
+        }
+      }
+    }
+    if(last)break;
+  }
+  return out.subarray(0,olen);
+}
 async function inflate(b64){
   const bytes=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
-  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return JSON.parse(await new Response(stream).text());
+  let text;
+  try{
+    if(typeof DecompressionStream!=='function')throw new Error('no DecompressionStream');
+    const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    text=await new Response(stream).text();
+  }catch(e){
+    text=new TextDecoder().decode(gunzipJS(bytes));
+  }
+  return JSON.parse(text);
 }
 let ROWS=[], DAYS=[];
 function initData(){
@@ -444,7 +629,7 @@ function initData(){
 }
 
 /* ══════════════ config ══════════════ */
-const FIELDS=['deal_id','salesforce_crm_id','currency','deal_name','name_source','business_line','brand','agency_group_name','agency','channel_id','dsp','connection_type','seat_id','country_served','country_sold','owner','am_csm','inventory_type','format','first_seen'];
+const FIELDS=['deal_id','salesforce_crm_id','currency','deal_name','name_source','business_line','brand','agency_group_name','agency','channel_id','dsp','connection_type','seat_id','country_served','country_sold','owner','am_csm','inventory_type','format','record_type','first_seen'];
 const TABLE_FIELDS=['date',...FIELDS];   // date is a table dimension, not a dropdown filter
 // display names (data keys unchanged): Agency → Partner
 const FIELD_LABELS={agency:'partner',agency_group_name:'partner group'};
@@ -472,6 +657,7 @@ const STATES={
   monetizing:{label:'💰 Monetizing', dot:'dot-mon',  desc:'gross revenue > 0 in period'},
   no_bids:   {label:'⚠️ No bids',    dot:'dot-nobid',desc:'requests > 0 and 0 bids in period'},
   no_requests:{label:'🚫 No requests',dot:'dot-noreq',desc:'active in period but 0 requests'},
+  no_imps:   {label:'👁 No impressions',dot:'dot-noimp',desc:'requests > 0 and 0 impressions in period'},
   dark:      {label:'🔻 Went dark',  dot:'dot-dark', desc:'monetized in the previous window, no activity now (table shows their previous-window rows)'},
 };
 
@@ -487,6 +673,8 @@ const PAGE_SIZE=25;
 // money metric → the actual embedded column for the current currency mode
 const col=m=>MONEY_BASE.includes(m)?m+'_'+curMode:m;
 const fmtMoney=n=>n==null?'—':(curMode==='eur'?'€':'')+Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+// KPI card: sin decimales (el importe completo con centimos desbordaba la tarjeta)
+const fmtMoney0=n=>n==null?'—':(curMode==='eur'?'€':'')+Math.round(Number(n)).toLocaleString('en-US',{maximumFractionDigits:0});
 const fmtInt=n=>n==null?'—':Number(n).toLocaleString('en-US');
 const escapeHtml=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -510,7 +698,7 @@ function calNav(step,e){
   calRender();
 }
 function calToggle(e){
-  e&&e.stopPropagation();
+  e&&e.stopPropagation(); viewsClose();
   FIELDS.forEach(x=>{document.getElementById('ms-dd-'+x)?.classList.remove('open');document.getElementById('ms-trig-'+x)?.classList.remove('open');});
   const dd=document.getElementById('cal-dd');
   dd.classList.toggle('open');
@@ -576,16 +764,12 @@ function updateRangeLabels(){
   document.getElementById('ftr-range').textContent=lbl;
 }
 let filtersOpen=true;
-function toggleFilters(){
-  filtersOpen=!filtersOpen;
-  document.getElementById('filters-body').style.display=filtersOpen?'':'none';
-  document.getElementById('filters-toggle').textContent=filtersOpen?'▲ Hide':'▼ Show';
-  updateFiltersSummary();
-}
+// filters are always visible now (no collapse control)
+function toggleFilters(){}
 function updateFiltersSummary(){
   const n=FIELDS.filter(f=>selected[f].size>0).length;
   document.getElementById('filters-summary').textContent=
-    (!filtersOpen&&n>0)?`· ${n} filter${n>1?'s':''} active`:'';
+    (n>0)?`· ${n} filter${n>1?'s':''} active`:'';
 }
 function setCurMode(m){
   curMode=m;
@@ -634,12 +818,12 @@ function dealStats(){
     const inPrev=prevSet?prevSet.has(r.date):false;
     if(!inCur&&!inPrev)continue;
     let s=m.get(r.deal_id);
-    if(!s){s={req:0,bids:0,gross:0,rows:0,prevGross:0,prevRows:0,first_seen:r.first_seen}; m.set(r.deal_id,s);}
-    if(inCur){s.rows++; s.req+=r.requests||0; s.bids+=r.bids||0; s.gross+=r['gross_revenue_'+curMode]||0;}
+    if(!s){s={req:0,bids:0,imps:0,gross:0,rows:0,prevGross:0,prevRows:0,first_seen:r.first_seen}; m.set(r.deal_id,s);}
+    if(inCur){s.rows++; s.req+=r.requests||0; s.bids+=r.bids||0; s.imps+=r.impressions||0; s.gross+=r['gross_revenue_'+curMode]||0;}
     else {s.prevRows++; s.prevGross+=r['gross_revenue_'+curMode]||0;}
   }
   const start=w.lo||DAYS[0];
-  const sets={all:new Set(),new:new Set(),monetizing:new Set(),no_bids:new Set(),no_requests:new Set(),dark:new Set()};
+  const sets={all:new Set(),new:new Set(),monetizing:new Set(),no_bids:new Set(),no_requests:new Set(),no_imps:new Set(),dark:new Set()};
   for(const [id,s] of m){
     if(s.rows>0){
       sets.all.add(id);
@@ -647,6 +831,8 @@ function dealStats(){
       if(s.gross>0)sets.monetizing.add(id);
       if(s.req>0&&s.bids===0)sets.no_bids.add(id);
       if(s.req===0)sets.no_requests.add(id);
+      // deals que piden y no sirven nada: 0 impresiones con requests > 0
+      if(s.req>0&&s.imps===0)sets.no_imps.add(id);
     } else if(s.prevGross>0){
       sets.dark.add(id);
     }
@@ -659,6 +845,7 @@ function dealState(id){
   if(sets.dark.has(id))return 'dark';
   if(sets.no_requests.has(id))return 'no_requests';
   if(sets.no_bids.has(id))return 'no_bids';
+  if(sets.no_imps.has(id))return 'no_imps';
   if(sets.monetizing.has(id))return 'monetizing';
   return null;
 }
@@ -717,9 +904,18 @@ function msHtml(f){
           <span class="ms-label" id="ms-label-${f}">All</span><span class="ms-arrow">▼</span>
         </div>
         <div class="ms-dropdown" id="ms-dd-${f}">
-          <div class="ms-search"><input type="text" placeholder="Search…" oninput="msSearch('${f}',this.value)"></div>
+          <div class="ms-search">
+            <input type="text" placeholder="Search…" oninput="msSearch('${f}',this.value)">
+            <button class="ms-x" id="ms-x-${f}" onclick="msClearSearch('${f}')" title="Clear search">✕</button>
+          </div>
           <div class="ms-options" id="ms-opts-${f}"></div>
-          <div class="ms-footer"><button onclick="msClear('${f}')">Clear</button></div>
+          <div class="ms-footer">
+            <span class="ms-count" id="ms-count-${f}"></span>
+            <span class="ms-btns">
+              <button id="ms-selall-${f}" onclick="msSelectAll('${f}')">Select all</button>
+              <button id="ms-clear-${f}" onclick="msClear('${f}')">Clear</button>
+            </span>
+          </div>
         </div>
       </div>
     </div>`;
@@ -730,8 +926,17 @@ function buildFilters(){
   FIELDS.forEach(f=>buildOptions(f));
 }
 const MAX_OPTS=500;
+function msQuery(f){
+  const inp=document.querySelector(`#ms-dd-${f} .ms-search input`);
+  return inp?inp.value:'';
+}
+// options currently visible in the dropdown = search-matched (all of them if no search)
+function msVisible(f){
+  const q=msQuery(f).toLowerCase();
+  return optionsFor(f).filter(v=>!q||String(v).toLowerCase().includes(q));
+}
 function buildOptions(f,q=''){
-  q=q.toLowerCase();
+  const raw=q; q=q.toLowerCase();
   const all=optionsFor(f).filter(v=>!q||String(v).toLowerCase().includes(q));
   const shown=all.slice(0,MAX_OPTS);
   document.getElementById('ms-opts-'+f).innerHTML=shown.map(v=>
@@ -739,9 +944,15 @@ function buildOptions(f,q=''){
        <input type="checkbox" ${selected[f].has(v)?'checked':''} onchange="msPick('${f}','${encodeURIComponent(v)}',this.checked)">
        <span title="${escapeHtml(v)}">${escapeHtml(v)}</span></label>`).join('')
     +(all.length>MAX_OPTS?`<div class="ms-option muted">… ${fmtInt(all.length-MAX_OPTS)} more — refine the search</div>`:'');
+  // ✕ visibility, selected counter, and Select all / Clear scoped to the search results
+  document.getElementById('ms-x-'+f).classList.toggle('show',raw.length>0);
+  const n=selected[f].size;
+  document.getElementById('ms-count-'+f).textContent=n?fmtInt(n)+' selected':'';
+  document.getElementById('ms-selall-'+f).textContent=q?'Select '+fmtInt(all.length):'Select all';
+  document.getElementById('ms-clear-'+f).textContent=q?'Clear these':'Clear';
 }
 function msToggle(f,e){
-  e&&e.stopPropagation(); calClose();
+  e&&e.stopPropagation(); calClose(); viewsClose();
   FIELDS.forEach(x=>{if(x!==f){document.getElementById('ms-dd-'+x).classList.remove('open');document.getElementById('ms-trig-'+x).classList.remove('open');}});
   document.getElementById('ms-dd-'+f).classList.toggle('open');
   document.getElementById('ms-trig-'+f).classList.toggle('open');
@@ -749,11 +960,21 @@ function msToggle(f,e){
 document.addEventListener('click',e=>{if(!e.target.closest('.ms-wrap')){FIELDS.forEach(f=>{
   document.getElementById('ms-dd-'+f).classList.remove('open');
   document.getElementById('ms-trig-'+f).classList.remove('open');});
-  calClose(); calStart=null;}});
+  calClose(); calStart=null; viewsClose();}});
 function msSearch(f,q){buildOptions(f,q);}
+function msClearSearch(f){
+  const inp=document.querySelector(`#ms-dd-${f} .ms-search input`);
+  if(inp){inp.value='';inp.focus();}
+  buildOptions(f,'');
+}
 function msPick(f,enc,on){const v=decodeURIComponent(enc); if(on)selected[f].add(v); else selected[f].delete(v); applyFilters();}
-function msClear(f){selected[f].clear();buildOptions(f);
-  const inp=document.querySelector(`#ms-dd-${f} .ms-search input`); if(inp){inp.value='';msSearch(f,'');} applyFilters();}
+// With an active search, Select all / Clear act only on the matching options;
+// without one they act on everything.
+function msSelectAll(f){msVisible(f).forEach(v=>selected[f].add(v)); applyFilters();}
+function msClear(f){
+  if(msQuery(f)){msVisible(f).forEach(v=>selected[f].delete(v));}
+  else selected[f].clear();
+  applyFilters();}
 function clearAllFilters(){FIELDS.forEach(f=>selected[f].clear());stateFilter=null;applyFilters();}
 function applyFilters(){
   _optCache=null; _stats=null;
@@ -780,8 +1001,10 @@ function buildKpis(){
     card('new','🆕 New deals',fmtInt(sets.new.size),'first seen in period',true)+
     card('monetizing','💰 Monetizing',fmtInt(sets.monetizing.size),'gross &gt; 0',true)+
     card('no_bids','⚠️ No bids',fmtInt(sets.no_bids.size),'requests but 0 bids',true)+
+    card('no_requests','🚫 No requests',fmtInt(sets.no_requests.size),'active but 0 requests',true)+
+    card('no_imps','👁 No impressions',fmtInt(sets.no_imps.size),'requests but 0 impressions',true)+
     card('dark','🔻 Went dark',fmtInt(sets.dark.size),'monetized before, silent now',true)+
-    card(null,'Gross revenue',fmtMoney(gross),(curMode==='eur'?'EUR':'local — mixed currencies')+(stateFilter?' · '+STATES[stateFilter].label:''),false);
+    card(null,'Gross revenue',fmtMoney0(gross),(curMode==='eur'?'EUR':'local — mixed currencies')+(stateFilter?' · '+STATES[stateFilter].label:''),false);
 }
 
 /* ══════════════ health matrix ══════════════ */
@@ -798,7 +1021,7 @@ function buildMatrix(){
   const gcol='gross_revenue_'+curMode;
   // deal → groups it appears under (period rows; dark deals via prev rows)
   const per=new Map();
-  const get=bl=>{let o=per.get(bl); if(!o){o={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),dark:new Set(),gross:0}; per.set(bl,o);} return o;};
+  const get=bl=>{let o=per.get(bl); if(!o){o={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),noi:new Set(),dark:new Set(),gross:0}; per.set(bl,o);} return o;};
   for(const r of ROWS){
     if(!dimPass(r))continue;
     const bl=r[matrixBy]||'(none)';
@@ -810,13 +1033,15 @@ function buildMatrix(){
       if(sets.monetizing.has(id))o.mon.add(id);
       if(sets.no_bids.has(id))o.nob.add(id);
       if(sets.no_requests.has(id))o.nor.add(id);
+      if(sets.no_imps.has(id))o.noi.add(id);
       o.gross+=r[gcol]||0;
     } else if(pset&&pset.has(r.date)&&sets.dark.has(r.deal_id)){
       get(bl).dark.add(r.deal_id);
     }
   }
   const COLS=[['deals',null,'deals'],['nw','new','new'],['mon','monetizing','monetizing'],
-              ['nob','no_bids','no bids'],['nor','no_requests','no requests'],['dark','dark','went dark']];
+              ['nob','no_bids','no bids'],['nor','no_requests','no requests'],
+              ['noi','no_imps','no impressions'],['dark','dark','went dark']];
   document.getElementById('mx-head').innerHTML=`<tr><th>${MX_LABELS[matrixBy]}</th>`+
     COLS.map(c=>`<th class="number">${c[2]}</th>`).join('')+'<th class="number">gross revenue</th><th class="number">pct</th></tr>';
   let bls=[...per.entries()].sort((a,b)=>b[1].gross-a[1].gross);
@@ -825,8 +1050,8 @@ function buildMatrix(){
   let others=null, hidden=0;
   if(bls.length>MX_TOP+1){
     const tail=bls.slice(MX_TOP); bls=bls.slice(0,MX_TOP); hidden=tail.length;
-    others={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),dark:new Set(),gross:0};
-    tail.forEach(([,o])=>{['deals','nw','mon','nob','nor','dark'].forEach(k=>o[k].forEach(x=>others[k].add(x))); others.gross+=o.gross;});
+    others={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),noi:new Set(),dark:new Set(),gross:0};
+    tail.forEach(([,o])=>{['deals','nw','mon','nob','nor','noi','dark'].forEach(k=>o[k].forEach(x=>others[k].add(x))); others.gross+=o.gross;});
   }
   const cell=(o,c,bl)=>{
     const n=o[c[0]].size, st=c[1];
@@ -840,7 +1065,7 @@ function buildMatrix(){
       +COLS.map(c=>`<td class="number muted">${fmtInt(others[c[0]].size)}</td>`).join('')
       +`<td class="number muted">${fmtMoney(others.gross)}</td><td class="number muted">${totG?(100*others.gross/totG).toFixed(1):'0'}%</td></tr>`;
   }
-  const t={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),dark:new Set()};
+  const t={deals:new Set(),nw:new Set(),mon:new Set(),nob:new Set(),nor:new Set(),noi:new Set(),dark:new Set()};
   const allGroups=others?[...bls,['(others)',others]]:bls;
   allGroups.forEach(([,o])=>Object.keys(t).forEach(k=>o[k].forEach(x=>t[k].add(x))));
   html+='<tr class="total-row"><td>TOTAL</td>'+COLS.map(c=>`<td class="number">${fmtInt(t[c[0]].size)}</td>`).join('')
@@ -854,6 +1079,57 @@ function matrixClick(blEnc,st){
   if(!already){selected[matrixBy].add(bl); stateFilter=st;}
   else stateFilter=null;
   applyFilters();
+}
+
+/* ══════════════ new deals by owner (weekly) ══════════════ */
+let ndOpen=true;
+function toggleNewDeals(){
+  ndOpen=!ndOpen;
+  document.getElementById('nd-body').style.display=ndOpen?'':'none';
+  document.getElementById('nd-toggle').textContent=ndOpen?'▲ Hide':'▼ Show';
+  if(ndOpen)buildNewDeals(); // se salta el rebuild mientras está plegada
+}
+function weekStart(d){ // lunes de la semana ISO de una fecha YYYY-MM-DD
+  const dt=new Date(d+'T00:00:00Z');
+  dt.setUTCDate(dt.getUTCDate()-(dt.getUTCDay()+6)%7);
+  return dt.toISOString().slice(0,10);
+}
+function buildNewDeals(){
+  if(!ndOpen)return;
+  // deals cuyo first_seen cae en el rango, agrupados por owner y semana de first_seen.
+  // Respeta filtros de dimensión; el filtro de estado no aplica (es una serie temporal).
+  const per=new Map(); // owner → Map(week → Set(deal_id))
+  for(const r of ROWS){
+    const fs=r.first_seen;
+    if(!fs||fs<rangeFrom||fs>rangeTo||!dimPass(r))continue;
+    const o=r.owner||'(none)', wk=weekStart(fs);
+    let m=per.get(o); if(!m){m=new Map(); per.set(o,m);}
+    let s=m.get(wk); if(!s){s=new Set(); m.set(wk,s);}
+    s.add(r.deal_id);
+  }
+  // columnas: todas las semanas del rango, también las vacías
+  const weeks=[];
+  for(let wk=weekStart(rangeFrom);wk<=rangeTo;){
+    weeks.push(wk);
+    const dt=new Date(wk+'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate()+7);
+    wk=dt.toISOString().slice(0,10);
+  }
+  document.getElementById('nd-head').innerHTML='<tr><th>owner</th>'
+    +weeks.map(w=>`<th class="number">${w}</th>`).join('')+'<th class="number">total</th></tr>';
+  const rowTotal=m=>{const ids=new Set(); m.forEach(s=>s.forEach(id=>ids.add(id))); return ids.size;};
+  const owners=[...per.entries()].sort((a,b)=>rowTotal(b[1])-rowTotal(a[1]));
+  const cnt=(m,w)=>{const s=m.get(w); return s?s.size:0;};
+  let html=owners.map(([o,m])=>'<tr><td title="'+escapeHtml(o)+'">'+escapeHtml(o)+'</td>'
+    +weeks.map(w=>{const n=cnt(m,w);return `<td class="number${n?'':' muted'}">${n?fmtInt(n):'·'}</td>`;}).join('')
+    +`<td class="number">${fmtInt(rowTotal(m))}</td></tr>`).join('');
+  // total por semana: deals únicos (un deal con varios owners cuenta una vez)
+  const tot=new Map(); per.forEach(m=>m.forEach((s,w)=>{let t=tot.get(w); if(!t){t=new Set();tot.set(w,t);} s.forEach(id=>t.add(id));}));
+  const allIds=new Set(); tot.forEach(s=>s.forEach(id=>allIds.add(id)));
+  html+='<tr class="total-row"><td>TOTAL</td>'
+    +weeks.map(w=>`<td class="number">${fmtInt(tot.get(w)?tot.get(w).size:0)}</td>`).join('')
+    +`<td class="number">${fmtInt(allIds.size)}</td></tr>`;
+  document.getElementById('nd-tbody').innerHTML=owners.length?html:
+    '<tr><td class="muted">No new deals in the selected range</td></tr>';
 }
 
 /* ══════════════ pickers ══════════════ */
@@ -919,10 +1195,31 @@ function setChartScale(v){chartScale=v;
   document.getElementById('sc-lin').classList.toggle('active',v==='linear');
   document.getElementById('sc-log').classList.toggle('active',v==='log');
   buildChart();}
+// chart granularity: data is daily only for the last ~60 days (GRAIN.daily_from),
+// weekly back to GRAIN.weekly_from, monthly before that — day/week views clip
+// to where that grain exists; month/quarter/year cover everything.
+let chartGran='day';
+function setChartGran(g){
+  chartGran=g;
+  document.querySelectorAll('.cgb').forEach(b=>b.classList.toggle('active',b.dataset.g===g));
+  buildChart();
+}
+function bucketOf(d,g){
+  if(g==='day')return d;
+  if(g==='week')return weekStart(d);
+  if(g==='month')return d.slice(0,7)+'-01';
+  if(g==='quarter'){const m=Math.floor((+d.slice(5,7)-1)/3)*3+1;return d.slice(0,4)+'-'+String(m).padStart(2,'0')+'-01';}
+  return d.slice(0,4)+'-01-01';
+}
+const granMin=g=>g==='day'?GRAIN.daily_from:(g==='week'?GRAIN.weekly_from:null);
 function buildChart(){
   const metric=document.getElementById('chart-metric').value;
-  const DAYSw=chartDays();
-  const rows=filteredRows();
+  const gran=chartGran, minD=granMin(gran);
+  const rawDays=chartDays();
+  const visDays=minD?rawDays.filter(d=>d>=minD):rawDays;
+  const clipped=minD&&rawDays.length&&rawDays[0]<minD;
+  const DAYSw=[...new Set(visDays.map(d=>bucketOf(d,gran)))].sort();
+  const rows=filteredRows().filter(r=>!minD||r.date>=minD);
   const isCount=metric.startsWith('__');
   const dv=DERIVED[metric];
   const series=new Map(); // key -> day -> number | Set (counts) | {n,d} (derived)
@@ -933,12 +1230,15 @@ function buildChart(){
     if(isCount){
       const req=r.requests||0,b=r.bids||0,g=r['gross_revenue_'+curMode]||0;
       const ok=metric==='__deals'||(metric==='__no_bids'?(req>0&&b===0):g>0);
-      if(ok){let s=m.get(r.date); if(!s){s=new Set();m.set(r.date,s);} s.add(r.deal_id);}
+      const bk=bucketOf(r.date,gran);
+      if(ok){let s=m.get(bk); if(!s){s=new Set();m.set(bk,s);} s.add(r.deal_id);}
     } else if(dv){
-      let o=m.get(r.date); if(!o){o={n:0,d:0};m.set(r.date,o);}
+      const bk=bucketOf(r.date,gran);
+      let o=m.get(bk); if(!o){o={n:0,d:0};m.set(bk,o);}
       o.n+=r[col(dv.num)]||0; o.d+=r[col(dv.den)]||0;
     } else {
-      m.set(r.date,(m.get(r.date)||0)+(r[col(metric)]||0));
+      const bk=bucketOf(r.date,gran);
+      m.set(bk,(m.get(bk)||0)+(r[col(metric)]||0));
     }
   });
   const val=(k,d)=>{const v=series.get(k).get(d); if(v==null)return 0;
@@ -1002,7 +1302,7 @@ function buildChart(){
   const hint=(!isLog&&ratio>100)?` <span style="color:var(--accent);font-weight:600">⚠ series differ by ~10^${Math.round(Math.log10(ratio))} — the small one is invisible; use Log scale or filter by origin</span>`:'';
   document.getElementById('chart-legend').innerHTML=keys.map((k,i)=>
     `<span class="li"><span class="sw" style="background:${CHART_COLORS[i%CHART_COLORS.length]}"></span>${escapeHtml(k)}</span>`).join('')
-    +`<span class="li muted">· ${dv&&dv.kind==='pct'?'% (ratio of sums/day)':isMoney?(curMode==='eur'?'EUR':'local currency (mixed)'):(isCount?'distinct deals/day':'units')}${isLog?' · log scale'+(chartType==='bar'?' (bars shown as lines)':''):''}${stateFilter==='dark'?' · showing previous window':''}</span>`+hint;
+    +`<span class="li muted">· per ${gran} · ${dv&&dv.kind==='pct'?'% (ratio of sums)':isMoney?(curMode==='eur'?'EUR':'local currency (mixed)'):(isCount?'distinct deals':'units')}${isLog?' · log scale'+(chartType==='bar'?' (bars shown as lines)':''):''}${stateFilter==='dark'?' · showing previous window':''}${clipped?` · ⚠️ ${gran} grain only exists since ${minD} — earlier range clipped (use Month/Quarter/Year)`:''}</span>`+hint;
 }
 
 /* ══════════════ state chips ══════════════ */
@@ -1095,6 +1395,120 @@ function rebuildTable(){
   renderPagination('tbl-pag',pages,page,p=>{page=p;rebuildTable();});
 }
 
+
+/* ══════════════ Details / Evolution tabs ══════════════ */
+let tableTab='details';
+function setTableTab(t){
+  tableTab=t;
+  const det=t==='details';
+  // each view shows only its own table and its own setup card
+  document.getElementById('pane-details').style.display = det?'':'none';
+  document.getElementById('pane-evo').style.display     = det?'none':'';
+  document.getElementById('cfg-details').style.display  = det?'':'none';
+  document.getElementById('cfg-evo').style.display      = det?'none':'';
+  document.getElementById('vsw-details').classList.toggle('active',det);
+  document.getElementById('vsw-evo').classList.toggle('active',!det);
+  document.getElementById('tbl-hint').textContent = det
+    ? '— click ▸ on any row to see its full-window evolution'
+    : '— periods as columns; up to 2 segments and 3 metrics';
+  document.getElementById('csv-btn').setAttribute('onclick', det?'tableCSV()':'evdCSV()');
+  if(det)rebuildTable(); else evdRender();
+}
+
+/* ══════════════ Evolution pivot (periods as columns) ══════════════ */
+const EVD_ROW_FIELDS=['business_line','connection_type','agency','agency_group_name','dsp','channel_id',
+                      'origin','name_source','inventory_type','country_served','owner','deal_name'];
+const EVD_METRIC_CHOICES=['gross_revenue','margin','requests','bids','impressions','cpm','bid_rate','win_rate','margin_pct'];
+let evdRows=['business_line'], evdMets=['gross_revenue'], evdGran='month';
+
+function evdInit(){
+  document.getElementById('evd-rowbtns').innerHTML=EVD_ROW_FIELDS.map(f=>
+    `<button class="mini-btn evd-r ${evdRows.includes(f)?'active':''}" data-f="${f}" onclick="evdToggleRow('${f}')">${fLabel(f)}</button>`).join('');
+  document.getElementById('evd-metbtns').innerHTML=EVD_METRIC_CHOICES.map(m=>
+    `<button class="mini-btn evd-m ${evdMets.includes(m)?'active':''}" data-m="${m}" onclick="evdToggleMet('${m}')">${fLabel(m)}</button>`).join('');
+  document.getElementById('evd-gran').value=evdGran;
+}
+function evdSyncBtns(){
+  document.querySelectorAll('.evd-r').forEach(b=>b.classList.toggle('active',evdRows.includes(b.dataset.f)));
+  document.querySelectorAll('.evd-m').forEach(b=>b.classList.toggle('active',evdMets.includes(b.dataset.m)));
+}
+// max 2 row fields / max 3 metrics: a further pick drops the oldest instead of dead-clicking
+function evdToggleRow(f){
+  const i=evdRows.indexOf(f);
+  if(i>=0){ if(evdRows.length>1)evdRows.splice(i,1); }
+  else { evdRows.push(f); if(evdRows.length>2)evdRows.shift(); }
+  evdSyncBtns(); evdRender();
+}
+function evdToggleMet(m){
+  const i=evdMets.indexOf(m);
+  if(i>=0){ if(evdMets.length>1)evdMets.splice(i,1); }
+  else { evdMets.push(m); if(evdMets.length>3)evdMets.shift(); }
+  evdSyncBtns(); evdRender();
+}
+function evdSetGran(g){evdGran=g; evdRender();}
+
+let _evdMatrix=null;
+function evdRender(){
+  const rows=filteredRows();
+  const periods=[...new Set(rows.map(r=>periodOf(r.date,evdGran)))].sort();
+  // derived metrics need their numerator/denominator summed, never the ratio
+  const need=new Set();
+  evdMets.forEach(m=>{const d=DERIVED[m]; if(d){need.add(d.num);need.add(d.den);} else need.add(m);});
+  const agg=new Map(), tot=new Map(), combo=new Map();
+  const SEP='\u0001';
+  for(const r of rows){
+    const per=periodOf(r.date,evdGran);
+    const parts=evdRows.map(f=>r[f]??'(none)');
+    const ck=parts.join(SEP);
+    if(!combo.has(ck))combo.set(ck,parts);
+    const key=ck+SEP+per;
+    let o=agg.get(key); if(!o){o={}; agg.set(key,o);}
+    // money metrics live as <name>_eur / <name>_lc in the payload
+    need.forEach(n=>{const col=MONEY_BASE.includes(n)?n+'_'+curMode:n; o[n]=(o[n]||0)+(r[col]||0);});
+    tot.set(ck,(tot.get(ck)||0)+(r['gross_revenue_'+curMode]||0));
+  }
+  const val=(cell,m)=>{
+    if(!cell)return null;
+    const d=DERIVED[m];
+    if(d){const den=cell[d.den]||0; return den?(cell[d.num]||0)/den*d.mult:null;}
+    return cell[m]||0;
+  };
+  const cks=[...tot.entries()].sort((a,b)=>b[1]-a[1]).map(e=>e[0]);
+  document.getElementById('evd-head').innerHTML='<tr>'
+    +evdRows.map(f=>`<th>${fLabel(f)}</th>`).join('')
+    +'<th>metric</th>'
+    +periods.map(p=>`<th class="number">${p}</th>`).join('')+'<th class="number">total</th></tr>';
+  let html='';
+  for(const ck of cks){
+    const parts=combo.get(ck);
+    html+=evdMets.map((m,i)=>{
+      const tds=periods.map(p=>{const v=val(agg.get(ck+SEP+p),m);
+        return `<td class="number">${v==null?'·':fmtMetric(m,v)}</td>`;}).join('');
+      const d=DERIVED[m]; let tv;
+      if(d){let n=0,dd=0; periods.forEach(p=>{const c=agg.get(ck+SEP+p); if(c){n+=c[d.num]||0; dd+=c[d.den]||0;}}); tv=dd?n/dd*d.mult:null;}
+      else {tv=periods.reduce((a,p)=>{const c=agg.get(ck+SEP+p); return a+(c?(c[m]||0):0);},0);}
+      return '<tr>'+parts.map(x=>`<td title="${escapeHtml(x)}">${i===0?escapeHtml(x):'<span class="muted">〃</span>'}</td>`).join('')
+        +`<td class="muted">${fLabel(m)}</td>`+tds+`<td class="number">${tv==null?'·':fmtMetric(m,tv)}</td></tr>`;
+    }).join('');
+  }
+  document.getElementById('evd-body').innerHTML=html||`<tr><td class="muted" colspan="${evdRows.length+periods.length+2}">No data for the current filters</td></tr>`;
+  document.getElementById('evd-count').textContent=
+    `${fmtInt(cks.length)} ${evdRows.map(fLabel).join(' × ')} combinations · ${periods.length} ${evdGran}s`
+    +` · ${curMode==='eur'?'EUR':'⚠ local currency'}`+(stateFilter?` · state: ${stateFilter.replace(/_/g,' ')}`:'');
+  _evdMatrix=[[...evdRows.map(fLabel),'metric',...periods,'total']];
+  for(const ck of cks){
+    const parts=combo.get(ck);
+    for(const m of evdMets){
+      const cells=periods.map(p=>{const v=val(agg.get(ck+SEP+p),m); return v==null?'':Math.round(v*100)/100;});
+      const d=DERIVED[m]; let tv;
+      if(d){let n=0,dd=0; periods.forEach(p=>{const c=agg.get(ck+SEP+p); if(c){n+=c[d.num]||0; dd+=c[d.den]||0;}}); tv=dd?Math.round(n/dd*d.mult*100)/100:'';}
+      else {tv=Math.round(periods.reduce((a,p)=>{const c=agg.get(ck+SEP+p); return a+(c?(c[m]||0):0);},0)*100)/100;}
+      _evdMatrix.push([...parts,fLabel(m),...cells,tv]);
+    }
+  }
+}
+function evdCSV(){ if(_evdMatrix)downloadCSV(_evdMatrix,'deals_evolution_'+evdGran); }
+
 /* ══════════════ drill-down: full-window evolution of one row ══════════════ */
 function periodOf(d,gran){
   if(gran==='day')return d;
@@ -1185,8 +1599,190 @@ function prepareEmail(){
   window.location.href='mailto:'+encodeURIComponent(to)+'?subject='+subject+'&body='+body;
 }
 
+/* ══════════════ saved views ══════════════
+   A view = JSON snapshot of every user-tweakable control. Persisted in
+   localStorage (per browser) AND — when served through the Apps Script
+   wrapper — in UserProperties via google.script.run (per Google account,
+   cross-device). The daily rebuild replaces the HTML, so views never live
+   in the file itself. applyState() is defensive: unknown fields/metrics
+   are dropped, dates are clamped to the embedded window, and a range that
+   ended on the latest day is saved as a relative lastN so it stays
+   anchored to "the most recent N days" on tomorrow's file. */
+function getState(){
+  const f={}; FIELDS.forEach(k=>{if(selected[k].size)f[k]=[...selected[k]];});
+  const range=rangeTo===MAXD
+    ? {lastN:DAYS.indexOf(rangeTo)-DAYS.indexOf(rangeFrom)+1}
+    : {from:rangeFrom,to:rangeTo};
+  return {v:1,filters:f,stateFilter,curMode,matrixBy,
+    selFields:[...selFields],selMetrics:[...selMetrics],
+    chartMetric:document.getElementById('chart-metric').value,
+    chartGran,chartType,chartScale,colorBy,sortCol,sortDir,
+    filtersOpen,ndOpen,range};
+}
+function applyState(s){
+  if(!s||typeof s!=='object')return;
+  try{
+    FIELDS.forEach(k=>selected[k].clear());
+    if(s.filters&&typeof s.filters==='object')
+      for(const k in s.filters){ if(selected[k]&&Array.isArray(s.filters[k]))s.filters[k].forEach(v=>selected[k].add(String(v))); }
+    stateFilter=STATES[s.stateFilter]?s.stateFilter:null;
+    if(s.curMode==='eur'||s.curMode==='lc')curMode=s.curMode;
+    if(MX_LABELS[s.matrixBy])matrixBy=s.matrixBy;
+    if(Array.isArray(s.selFields)){
+      const ok=s.selFields.filter(x=>TABLE_FIELDS.includes(x));
+      if(ok.length){selFields.clear();ok.forEach(x=>selFields.add(x));}
+    }
+    if(Array.isArray(s.selMetrics)){selMetrics.clear();s.selMetrics.filter(x=>ALL_METRICS.includes(x)).forEach(x=>selMetrics.add(x));}
+    if(['day','week','month','quarter','year'].includes(s.chartGran))chartGran=s.chartGran;
+    if(['bar','line'].includes(s.chartType))chartType=s.chartType;
+    if(['linear','log'].includes(s.chartScale))chartScale=s.chartScale;
+    if(['origin','business_line'].includes(s.colorBy))colorBy=s.colorBy;
+    sortCol=typeof s.sortCol==='string'?s.sortCol:null; sortDir=s.sortDir===1?1:-1;
+    const r=s.range||{};
+    if(r.lastN>0){rangeTo=MAXD;rangeFrom=DAYS[Math.max(0,DAYS.length-r.lastN)];}
+    else if(typeof r.from==='string'&&typeof r.to==='string'){
+      rangeFrom=r.from<MIND?MIND:(r.from>MAXD?MAXD:r.from);
+      rangeTo=r.to>MAXD?MAXD:(r.to<MIND?MIND:r.to);
+      if(rangeFrom>rangeTo){rangeFrom=DAYS[Math.max(0,DAYS.length-7)];rangeTo=MAXD;}
+    }
+    const cm=document.getElementById('chart-metric');
+    if(s.chartMetric&&[...cm.options].some(o=>o.value===s.chartMetric))cm.value=s.chartMetric;
+    if(typeof s.filtersOpen==='boolean')filtersOpen=s.filtersOpen;
+    if(typeof s.ndOpen==='boolean')ndOpen=s.ndOpen;
+    page=1; drillKey=null;
+    syncStateUI();
+  }catch(e){console.warn('applyState failed',e);}
+}
+// push in-memory state back into every control, then re-render everything
+function syncStateUI(){
+  document.querySelectorAll('.cur-btn').forEach(b=>b.classList.toggle('active',b.dataset.cur===curMode));
+  document.querySelectorAll('.mxb').forEach(b=>b.classList.toggle('active',b.dataset.f===matrixBy));
+  document.querySelectorAll('.cgb').forEach(b=>b.classList.toggle('active',b.dataset.g===chartGran));
+  document.getElementById('ct-bar').classList.toggle('active',chartType==='bar');
+  document.getElementById('ct-line').classList.toggle('active',chartType==='line');
+  document.getElementById('sc-lin').classList.toggle('active',chartScale==='linear');
+  document.getElementById('sc-log').classList.toggle('active',chartScale==='log');
+  document.getElementById('cb-origin').classList.toggle('active',colorBy==='origin');
+  document.getElementById('cb-bl').classList.toggle('active',colorBy==='business_line');
+  document.getElementById('cal-label').textContent=rangeFrom+' → '+rangeTo;
+  document.getElementById('filters-body').style.display=filtersOpen?'':'none';
+  document.getElementById('filters-toggle').textContent=filtersOpen?'▲ Hide':'▼ Show';
+  document.getElementById('nd-body').style.display=ndOpen?'':'none';
+  document.getElementById('nd-toggle').textContent=ndOpen?'▲ Hide':'▼ Show';
+  buildPickers(); updateRangeLabels();
+  applyFilters();   // refreshes ms labels + options and calls rebuildAll()
+}
+
+/* views store: {views:{name:state}, def:name|null} */
+const VIEWS_KEY='deals-views';
+let VSTORE={views:{},def:null};
+const gasAvailable=()=>typeof google!=='undefined'&&google.script&&google.script.run;
+function vLoadLocal(){
+  try{const s=localStorage.getItem(VIEWS_KEY); if(s){const o=JSON.parse(s); if(o&&o.views)VSTORE=o;}}catch(e){}
+}
+function vPersist(){
+  try{localStorage.setItem(VIEWS_KEY,JSON.stringify(VSTORE));}catch(e){}
+  if(gasAvailable()){
+    try{
+      google.script.run
+        .withSuccessHandler(()=>vSyncMsg('synced to your Google account'))
+        .withFailureHandler(e=>vSyncMsg('⚠ account sync failed — saved in this browser only'))
+        .saveViews(JSON.stringify(VSTORE));
+    }catch(e){vSyncMsg('saved in this browser only');}
+  } else vSyncMsg('saved in this browser (open via the shared link for account sync)');
+}
+function vSyncMsg(t){const el=document.getElementById('views-sync'); if(el)el.textContent=t;}
+// server copy wins over the local mirror (it's the cross-device source of truth)
+function vLoadRemote(){
+  if(!gasAvailable())return;
+  try{
+    google.script.run.withSuccessHandler(json=>{
+      if(!json)return;
+      try{
+        const o=JSON.parse(json);
+        if(o&&o.views){
+          const hadLocal=Object.keys(VSTORE.views).length>0;
+          VSTORE=o;
+          try{localStorage.setItem(VIEWS_KEY,JSON.stringify(VSTORE));}catch(e){}
+          viewsRenderMenu();
+          // apply the account default only if this session hasn't shown one yet
+          if(!hadLocal&&!location.hash.startsWith('#v=')&&VSTORE.def&&VSTORE.views[VSTORE.def])
+            applyState(VSTORE.views[VSTORE.def]);
+          vSyncMsg('synced to your Google account');
+        }
+      }catch(e){}
+    }).loadViews();
+  }catch(e){}
+}
+function viewsClose(){
+  document.getElementById('views-dd')?.classList.remove('open');
+  document.getElementById('views-trigger')?.classList.remove('open');
+}
+function viewsToggle(e){
+  e&&e.stopPropagation(); calClose();
+  FIELDS.forEach(x=>{document.getElementById('ms-dd-'+x)?.classList.remove('open');document.getElementById('ms-trig-'+x)?.classList.remove('open');});
+  viewsRenderMenu();
+  document.getElementById('views-dd').classList.toggle('open');
+  document.getElementById('views-trigger').classList.toggle('open');
+}
+function viewsRenderMenu(){
+  const names=Object.keys(VSTORE.views).sort();
+  document.getElementById('views-list').innerHTML=names.length?names.map(n=>{
+    const enc=encodeURIComponent(n), isDef=VSTORE.def===n;
+    return `<div class="ms-option" style="justify-content:space-between" onclick="viewApply('${enc}',event)">
+      <span title="${escapeHtml(n)}">${escapeHtml(n)}</span>
+      <span style="flex-shrink:0;display:inline-flex;gap:8px">
+        <span title="${isDef?'default view (applied on load)':'make default'}" onclick="viewSetDefault('${enc}',event)" style="opacity:${isDef?1:.35}">⭐</span>
+        <span title="delete view" onclick="viewDelete('${enc}',event)">🗑</span>
+      </span></div>`;
+  }).join(''):'<div class="ms-option muted">No saved views yet — set your filters and save below</div>';
+  document.getElementById('views-label').textContent=VSTORE.def?('⭐ '+VSTORE.def):'⭐ Views';
+}
+function viewSave(e){
+  e&&e.stopPropagation();
+  const inp=document.getElementById('view-name');
+  const name=(inp.value||'').trim()||VSTORE.def||'My view';
+  VSTORE.views[name]=getState();
+  if(!VSTORE.def)VSTORE.def=name;
+  inp.value='';
+  vPersist(); viewsRenderMenu();
+}
+function viewApply(enc,e){
+  e&&e.stopPropagation();
+  const s=VSTORE.views[decodeURIComponent(enc)];
+  if(s){applyState(s); viewsClose();}
+}
+function viewSetDefault(enc,e){
+  e&&e.stopPropagation();
+  const n=decodeURIComponent(enc);
+  VSTORE.def=(VSTORE.def===n)?null:n;
+  vPersist(); viewsRenderMenu();
+}
+function viewDelete(enc,e){
+  e&&e.stopPropagation();
+  const n=decodeURIComponent(enc);
+  delete VSTORE.views[n];
+  if(VSTORE.def===n)VSTORE.def=null;
+  vPersist(); viewsRenderMenu();
+}
+/* share: state → base64 in the URL hash; applied on load, beats the default view */
+const stateToHash=s=>btoa(unescape(encodeURIComponent(JSON.stringify(s))));
+function hashToState(){
+  if(!location.hash.startsWith('#v='))return null;
+  try{return JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(3)))));}catch(e){return null;}
+}
+function viewShare(e){
+  e&&e.stopPropagation();
+  const h='#v='+stateToHash(getState());
+  const url=location.origin==='null'?h:location.href.split('#')[0]+h;
+  const done=()=>{vSyncMsg('link copied — paste it to a colleague');};
+  if(navigator.clipboard)navigator.clipboard.writeText(url).then(done,()=>prompt('Copy this view link:',url));
+  else prompt('Copy this view link:',url);
+}
+
 /* ══════════════ boot ══════════════ */
-function rebuildAll(){_stats=null;buildKpis();buildMatrix();buildChips();buildChart();rebuildTable();}
+function rebuildAll(){_stats=null;buildKpis();buildMatrix();buildNewDeals();buildChips();buildChart();
+  if(tableTab==='evo')evdRender(); else rebuildTable();}
 // hover tooltip: nearest day column → all series values
 (function(){
   const wrap=document.getElementById('chart-wrap'), tip=document.getElementById('chart-tip');
@@ -1211,13 +1807,28 @@ function rebuildAll(){_stats=null;buildKpis();buildMatrix();buildChips();buildCh
   wrap.addEventListener('mouseleave',()=>tip.style.display='none');
 })();
 (async function boot(){
+  try{
   ROWS=unpack(await inflate(ROWS_B64));
   initData();
   MIND=DAYS[0]; MAXD=DAYS[DAYS.length-1];
   CAL_MONTHS=[...new Set(DAYS.map(d=>d.slice(0,7)))].sort();
   rangeFrom=DAYS[Math.max(0,DAYS.length-7)]; rangeTo=DAYS[DAYS.length-1];
   document.getElementById('cal-label').textContent=rangeFrom+' → '+rangeTo;
-  updateRangeLabels();buildChartMetricSelect();buildPickers();buildFilters();rebuildAll();
+  updateRangeLabels();buildChartMetricSelect();buildPickers();buildFilters();evdInit();
+  // saved views: URL hash beats the saved default beats the vanilla layout
+  vLoadLocal(); viewsRenderMenu();
+  const boot_state=hashToState()||(VSTORE.def&&VSTORE.views[VSTORE.def])||null;
+  if(boot_state)applyState(boot_state); else rebuildAll();
+  vLoadRemote();   // async reconcile with the per-account copy (Apps Script only)
+  // a pasted #v= link on an already-open page changes only the hash (no reload)
+  window.addEventListener('hashchange',()=>{const s=hashToState(); if(s)applyState(s);});
+  }catch(e){
+    // Un booteo fallido dejaba la página en blanco — mostramos el error para poder diagnosticar
+    document.body.insertAdjacentHTML('afterbegin',
+      '<div style="margin:24px;padding:16px;border:1px solid #FF6B7C;border-radius:8px;font-family:monospace">'+
+      'Dashboard failed to load: '+escapeHtml(String(e&&e.message||e))+'</div>');
+    throw e;
+  }
 })();
 </script>
 </body>

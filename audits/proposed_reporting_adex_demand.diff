@@ -1,0 +1,58 @@
+--- reporting_adex_demand.sql (current WIP)
++++ reporting_adex_demand.sql (proposed)
+@@ -42,14 +42,26 @@
+ --   * The STX branch keeps Beachfront/SpringServe traffic; the BFM branch keeps
+ --     its curation lines IN FULL. Each branch reports what its own source
+---     measured, so a migrated deal shows on both sides and the
+---     'DSP Marketplace' / 'DSP marketplace - Migrated' split tracks the
+---     migration (sep-2026: the deal_name anti-join was removed — it dropped
+---     real dual-routing revenue and mis-fired on name collisions).
++--     measured, so a migrated deal shows on both sides (sep-2026: the deal_name
++--     anti-join was removed — it dropped real dual-routing revenue and mis-fired
++--     on name collisions).
++--   * 'DSP marketplace - Migrated' is a SEEDTAG-SIDE label only: it means
++--     "revenue of a migrated deal measured by Seedtag (SSP responses)". Beachfront
++--     rows of the same deal stay 'DSP Marketplace' because a migrated deal may
++--     keep serving on Beachfront. The curation table already follows this rule
++--     (its BFM-origin rows are never 'Migrated'), so each branch reads the label
++--     of ITS OWN origin: bl_stx for the STX branch, bl_bfm for the BFM branch.
++--     A single "latest label per deal" lookup flipped between the two labels
++--     for deals serving on both sides the same day, and stamped 'Migrated' on
++--     Beachfront rows back to 2025 (fixed 2026-09-14).
+ 
+ WITH curation_bl AS (
+-    -- deal-level label from the curation table; LOWERCASED join key (some
+-    -- sources store deal ids in different case) and GROUP BY lower() so the
+-    -- lookup stays one row per deal (no join fan-out).
+-    SELECT lower(deal_id) AS deal_id_lc, max_by(business_line, date) AS bl
++    -- deal-level labels from the curation table, ONE PER ORIGIN; LOWERCASED
++    -- join key (some sources store deal ids in different case) and GROUP BY
++    -- lower() so the lookup stays one row per deal (no join fan-out).
++    --   bl_stx: latest label among the deal's Seedtag-side rows (origin STX)
++    --   bl_bfm: latest label among the deal's Beachfront-side rows (origin BFM)
++    SELECT lower(deal_id) AS deal_id_lc,
++           max_by(business_line, date) FILTER (WHERE origin = 'STX') AS bl_stx,
++           max_by(business_line, date) FILTER (WHERE origin = 'BFM') AS bl_bfm
+     FROM {{ ref('reporting_curation_deals') }}
+     GROUP BY 1
+@@ -79,5 +91,5 @@
+             WHEN r.product_type LIKE 'O%' THEN 'Open Auction - Seedtag'
+             WHEN r.product_type LIKE 'D%' THEN 'Direct Web - O&O'
+-            ELSE COALESCE(cbl.bl,
++            ELSE COALESCE(cbl.bl_stx, cbl.bl_bfm,
+                 CASE
+                     WHEN r.product_type LIKE 'Curation%' THEN 'PMP - Curation'
+@@ -143,7 +155,11 @@
+             CASE
+                 WHEN a.business_line = 'PMP - Seedtag' THEN 'PMP CTV - O&O'
+-                -- BFM-native curation lines take the deal-level curation label
++                -- BFM-native curation lines take the deal-level label of the
++                -- BEACHFRONT side only (never 'DSP marketplace - Migrated': a
++                -- migrated deal that still serves on Beachfront stays
++                -- 'DSP Marketplace' here; its Seedtag revenue is 'Migrated' in
++                -- the STX branch above)
+                 WHEN a.business_line IN ('Select - BFM', 'DSP Marketplace - BFM')
+-                    THEN COALESCE(cbl.bl,
++                    THEN COALESCE(cbl.bl_bfm,
+                          CASE a.business_line WHEN 'Select - BFM' THEN 'Curation 3rd Party'
+                                               ELSE 'DSP Marketplace' END)

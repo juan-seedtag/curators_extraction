@@ -1,3 +1,46 @@
+-- =====================================================================
+-- reporting_curation_deals — FULL REBUILD QUERY (Superset / Trino SQL Lab)
+--
+-- This is the definition of st_datalakehouse.analytics.reporting_curation_deals,
+-- verbatim from sql/deals_daily.sql in the curators_extraction repo. The
+-- production table is written by bf_automations/curation.py, which runs this
+-- same logic ONE DAY AT A TIME; this file is the full-window equivalent.
+--
+-- Three known differences vs the materialized table:
+--   1. pct_of_total is computed here; in the table it is NULL (a whole-window
+--      share cannot be produced by a per-day loader).
+--   2. Salesforce-only rows (deals with no delivery and no traffic anywhere)
+--      come from the FULL OUTER JOIN on sf here; the loader refreshes them in a
+--      separate pass at the end of a run.
+--   3. The dcm CTE here also selects hb_connector_wins / hb_inserts, which
+--      nothing downstream consumes.
+--
+-- BEFORE YOU RUN IT IN SUPERSET
+--   * Your Superset Trino connection needs BOTH catalogs: st_datalakehouse AND
+--     big_query_bdb. Missing big_query_bdb access is the most likely failure
+--     ("Cannot access catalog big_query_bdb") — several service accounts do not
+--     have it even though personal tokens do.
+--   * Full window returns ~842k rows and scans deal_channel_metrics_hourly,
+--     which holds roughly 6 billion rows PER DAY. Narrow the window first:
+--     edit the eight lines tagged <<WINDOW>> below (four pairs: dcm, del, closing_rep, bfx).
+--     Keep them as literal DATE constants — moving them into a CTE or a Jinja
+--     variable stops Trino pruning partitions and the query will scan
+--     everything.
+--   * The bounds NOT tagged <<WINDOW>> are deliberate and should stay at
+--     2025-01-01: they define the curation deal population, the traffic-based
+--     inventory_type, and first_seen, all of which need full history.
+--   * pct_of_total (last column) is a window function over the entire result.
+--     Drop that line if you only need a slice; it forces a full pass.
+--   * No Jinja in this query, so Superset's templating leaves it alone. If your
+--     Superset build raises a parameter error on the LIKE patterns, double the
+--     percent signs ('NEUROX%' -> 'NEUROX%%').
+--   * No trailing semicolon on purpose — Superset appends its own LIMIT.
+--
+-- If you only want the DATA rather than the definition, read the table instead:
+--   SELECT * FROM st_datalakehouse.analytics.reporting_curation_deals
+--   WHERE date >= DATE '2026-09-01'
+-- =====================================================================
+
 WITH sf AS (
   SELECT
     deal_id,
@@ -49,8 +92,8 @@ dcm AS (
     , sum(ssp_hb_inserts) as hb_inserts
     , sum(impressions) as impressions
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour >= date '2025-01-01'
-    AND date_hour < current_date  -- closed days only
+  WHERE date_hour >= date '2025-01-01'   -- <<WINDOW>>
+    AND date_hour < current_date   -- <<WINDOW>>
     AND deal_name IS NOT NULL
     -- dcm cubre TODO el exchange: solo deals de curation — conocidos en SF o
     -- con delivery. Cero identidades nuevas vs la poblacion del
@@ -81,7 +124,7 @@ traffic AS (
          SUM(impressions) AS total_imps,
          SUM(CASE WHEN source_type = 'Beachfront' THEN impressions ELSE 0 END) AS ctv_imps
   FROM st_datalakehouse.ad_exchange.deal_channel_metrics_hourly
-  WHERE date_hour >= date '2025-01-01'
+  WHERE date_hour >= date '2025-01-01'  -- full history ON PURPOSE (inventory_type)
   GROUP BY deal_id
 ),
 del AS (
@@ -108,8 +151,8 @@ del AS (
     sum(curator_margin_eur)           AS curator_margin_total_eur,
     sum(publisher_cost_eur)           AS pub_cost_eur
   FROM big_query_bdb.business.daily_curation_delivery_utc
-  WHERE dt >= date '2025-01-01'
-    AND dt < current_date  -- closed days only
+  WHERE dt >= date '2025-01-01'   -- <<WINDOW>>
+    AND dt < current_date   -- <<WINDOW>>
   GROUP BY 1, 2, 3, 4
 )
 
@@ -201,8 +244,6 @@ del AS (
           - coalesce(del.curator_margin_total_eur * sf.curator_margin_split, 0)
           - coalesce(del.post_auction_discount_eur, 0)
           - del.pub_cost_eur, 2)    AS margin_eur,
-    -- reported = the same figures on the Seedtag side (no separate "reported"
-    -- source exists for STX); Beachfront rows take closing's in the BFM branch
     del.gross_revenue_lc  AS reported_gross_revenue_lc,
     del.pub_cost_lc       AS reported_pub_cost_lc,
     del.gross_revenue_eur AS reported_gross_revenue_eur,
@@ -223,19 +264,18 @@ del AS (
   LEFT JOIN traffic tr ON coalesce(del.deal_id, dcm.deal_id) = tr.deal_id
 )
 
--- Reported figures for Beachfront = what closing reports: revenue net of Select
--- fees + the pro-rated Ent Aggregator subtraction, and publisher_cost. Closing is
--- finer than bfx (x dsp x channel x country x category x adomain), so it is
--- summed to the bfx grain (deal-day x seat) FIRST — joining raw rows inflates
--- ~4x. seat_id can be NULL on both sides → sentinel key. 452 seat-days carry two
--- bfx rows (two clearvu accounts): both get the seat-day amount, an accepted
--- +0.019% overcount. Verified 2026-09-16 (audits/sql_curation_deals_reported_cols.sql).
+-- Reported figures for Beachfront = what closing reports (revenue net of Select
+-- fees + Ent Aggregator, publisher_cost), summed to the bfx grain (deal-day x
+-- seat) FIRST — closing is far finer and joining raw rows inflates ~4x. NULL
+-- seat_id on both sides → sentinel key. 452 seat-days carry two bfx rows: both
+-- get the amount, an accepted +0.019% overcount (audits/sql_curation_deals_reported_cols.sql).
 , closing_rep as (
   select date, deal_id, deal_name, coalesce(seat_id, '∅') as seat_key,
          sum(revenue) as rep_rev, sum(publisher_cost) as rep_cost
   from st_datalakehouse.analytics.reporting_closing_bfm_demand
   where business_line in ('Select - BFM', 'DSP Marketplace - BFM')
-    and date >= date '2025-01-01'
+    and date >= date '2025-01-01'   -- <<WINDOW>>
+    and date < current_date   -- <<WINDOW>>
   group by 1, 2, 3, 4
 )
 , bfx as (
@@ -309,8 +349,8 @@ del AS (
     ) s
       on s.seat_id = a.seat_id and s.advertiser = a.advertiser
   where a.business_line in ('Select - BFM','DSP Marketplace - BFM')
-    and a.date >= date '2025-01-01'
-    and a.date < current_date  -- closed days only
+    and a.date >= date '2025-01-01'   -- <<WINDOW>>
+    and a.date < current_date   -- <<WINDOW>>
   group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
 )
 
@@ -366,10 +406,8 @@ del AS (
               then 'DSP ' || coalesce(bfm_m.channel_label, bfx.advertiser_raw)
               else bfx.agency end as agency,
          coalesce(bfm_m.channel_label, bfx.advertiser_raw) as channel_id,
-         -- dsp: si el seat resolvio un comprador real (Walmart, seat de Bidswitch)
-         -- ese nombre manda; si no, el label del mapping y el advertiser crudo.
-         -- (antes el mapping iba primero y pisaba SIEMPRE el seat: TTD y Bidswitch
-         -- estan en la tabla de mapping, asi que Walmart/Zeta nunca salian)
+         -- dsp: a seat-resolved buyer (TTD Walmart seats -> 'Walmart', Bidswitch
+         -- seats -> the seat's DSP) wins; otherwise the mapping label, raw as last resort
          case when bfx.dsp is distinct from bfx.advertiser_raw then bfx.dsp
               else coalesce(bfm_m.dsp_label, bfx.dsp) end as dsp,
          coalesce(bfm_m.connection_type, 'Direct')         as connection_type,
@@ -382,7 +420,7 @@ del AS (
          bfx.curator_margin_total_eur, bfx.curator_margin_stx_eur, bfx.curator_margin_curator_eur, bfx.margin_eur,
          round(cr.rep_rev, 2)  as reported_gross_revenue_lc,
          round(cr.rep_cost, 2) as reported_pub_cost_lc,
-         cast(null as double)  as reported_gross_revenue_eur,   -- EUR at the end via rates
+         cast(null as double)  as reported_gross_revenue_eur,
          cast(null as double)  as reported_pub_cost_eur,
          bfx.requests, bfx.bids, bfx.wins, bfx.impressions,
          bfx.sf_product_lines, bfx.record_type
