@@ -8,7 +8,7 @@
 --   {d}              -> a DATE WINDOW instead of a single day (see below)
 --
 -- WHICH QUERY IS THIS? — read this before trusting the output
---   Two different queries currently write st_datalakehouse.analytics.reporting_adex_demand:
+--   Two different queries can write st_datalakehouse.analytics.reporting_adex_demand:
 --     * THIS one (new architecture), run by adex_demand_new.py. It is what
 --       produced the data in the table today.
 --     * The OLD dbt model `reporting_adex_demand` in de_dbt_lakehouse, still an
@@ -17,83 +17,94 @@
 --   It has not fired since the swap on 2026-09-10, but it is not disabled.
 --   You asked for the new one; this is it.
 --
--- WHAT THE NEW ARCHITECTURE CHANGES
+-- WHAT THE NEW ARCHITECTURE CHANGES (rebuilt from scratch 2026-09-18)
 --   * No External/Managed branch at all.
---   * O&O/STX reads stg_ssp_responses_daily with NO Beachfront/SpringServe
---     exclusion, so BFM traffic with a Seedtag leg is measured here too.
---   * BFM reads reporting_closing_bfm_demand; 'Select - BFM' and
---     'DSP Marketplace - BFM' are kept IN FULL (no deal-name anti-join), so
---     migrated deals deliberately appear on both sides.
+--   * THREE branches with a hard cutover at 2025-06-01 so no day is counted
+--     twice: STX modern (stg_ssp_responses_daily, from 2025-06-01), STX legacy
+--     (ad_exchange.ssp_events_daily_simplified, before 2025-06-01 — the modern
+--     source has no history before 2025-05-19), and BFM (all dates).
+--   * BFM reads reporting_bfm_demand DIRECTLY, no longer
+--     reporting_closing_bfm_demand: closing's `revenue` is net of the Select
+--     fee adjustments, the pro-rated Ent Aggregator subtraction and the
+--     audience-segment cost, and adex reports what Beachfront reports. Every
+--     dimension closing used to supply is derived here with closing's OWN
+--     logic (seat-resolved dsp, mapping labels, ISO-2 country, Display/CTV,
+--     the PubMatic ST / BidSwitch-seat connection rule).
+--   * Open Auction - BFM applies BOTH closing's 10-advertiser perimeter AND
+--     the Seedtag-named deal exclusion (those arrive via STX).
+--   * 'Select - BFM' and 'DSP Marketplace - BFM' are kept IN FULL (no
+--     deal-name anti-join), so migrated deals deliberately appear on both
+--     sides.
 --   * business_line for P%/Curation% rows is a deal-level lookup against
 --     reporting_curation_deals.
+--   * inventory_type is part of the grain (added 2026-09-18): taken from the
+--     source on both STX branches, derived from media_type on BFM
+--     (Display -> Display, everything else -> CTV). The legacy STX source
+--     never populated it, so it is NULL for every pre-June-2025 STX row.
 --
 -- SINGLE DAY vs WINDOW
---   The loader runs one day at a time ({d}); here the four bounds tagged
+--   The loader runs this one day at a time. Here the six lines marked
 --   <<WINDOW>> are a RELATIVE 10-day window, `current_date - interval '10' day`
 --   to `current_date` (exclusive, so it ends on the last closed day). Relative
---   on purpose: a hardcoded range silently goes stale — this file sat at
---   2026-09-01..09-11 and was missing five loaded days when checked on
---   2026-09-17. Widening `date` is safe (it is the partition column and the two
---   branches are filtered independently), but keep it modest:
---   stg_ssp_responses_daily holds ~430M rows PER DAY. To pin an exact range for
---   a comparison, replace the four tagged lines with explicit timestamps.
---
--- COLUMNS RETURNED (loader INSERT order)
---   date, dsp_group_name, connection_type, business_line, product_category, publisher_country, clearvu_account, channel_id, revenue_gross, total_impressions, total_response_bids
---
--- If you only want the DATA rather than the definition, read the table:
---   SELECT * FROM st_datalakehouse.analytics.reporting_adex_demand
---   WHERE date >= DATE '2026-09-01'
+--   on purpose: a hardcoded range silently goes stale. Widen or pin them if you
+--   need a different period — but note the STX legacy branch only ever returns
+--   rows for a window reaching before 2025-06-01.
 -- =====================================================================
-
 WITH curation_bl AS (
     -- deal-level label from the curation table; LOWERCASED join key (some
     -- sources store deal ids in different case) and GROUP BY lower() so the
     -- lookup stays one row per deal (no join fan-out).
-    --   bl_stx: latest label among the deal's Seedtag-side rows (origin STX)
-    --   bl_bfm: latest label among the deal's Beachfront-side rows (origin BFM)
     SELECT lower(deal_id) AS deal_id_lc,
-           max_by(business_line, date) FILTER (WHERE origin = 'STX') AS bl_stx,
-           max_by(business_line, date) FILTER (WHERE origin = 'BFM') AS bl_bfm
+        max_by(business_line, date) FILTER (WHERE origin = 'STX') AS bl_stx,
+        max_by(business_line, date) FILTER (WHERE origin = 'BFM') AS bl_bfm
     FROM st_datalakehouse.analytics.reporting_curation_deals
     GROUP BY 1
 ),
 
 -- ONE row per advertiser_key: the mapping table has duplicate keys and a raw
--- join would fan out and double-count revenue.
+-- join would fan out and double-count revenue. `channel_label IS NOT NULL`
+-- mirrors the closing model, whose labels this branch now reproduces.
 bfm_map AS (
     SELECT advertiser_key,
            max(dsp_label)     AS dsp_label,
            max(channel_label) AS channel_label
     FROM st_datalakehouse.analytics.reporting_dsp_and_channel_mappings
+    WHERE channel_label IS NOT NULL
     GROUP BY 1
 ),
 
--- Beachfront's UNADJUSTED gross per deal-day. closing.revenue is net of the
--- Select fee adjustments and the pro-rated Ent Aggregator subtraction; adex
--- reports what Beachfront reports, so the revenue VALUE comes from
--- reporting_bfm_demand while every resolved dimension (dsp via the seat table,
--- channel, country, category, connection type) still comes from closing.
--- Verified 2026-09-17 on 2026-09-16: the BFM branch totals Beachfront's gross to
--- the cent ($69,127.06) for every deal-day closing carries; gross ~6% above net.
-bfm_gross AS (
-    SELECT date, deal_id, ad_name AS deal_name, sum(revenue_gross) AS gross
-    FROM st_datalakehouse.analytics.reporting_bfm_demand
-    WHERE business_line IN ('Open Auction - BFM', 'PMP - Seedtag',
-                            'Select - BFM', 'DSP Marketplace - BFM')
-      AND date >= current_date - interval '10' day   -- <<WINDOW>>
-      AND date < current_date   -- <<WINDOW>>
-    GROUP BY 1, 2, 3
+-- Beachfront seat resolution, lifted from the closing model. Only the two
+-- cases that actually rewrite the buyer are kept (BidSwitch seats carry the
+-- real DSP in seat_name; a Trade Desk WMT/Walmart seat is Walmart), and
+-- `seat_id <> seat_name` drops the rows where the seat adds nothing.
+seat_names AS (
+    SELECT DISTINCT seat_id, seat_name, advertiser
+    FROM st_datalakehouse.analytics.reporting_beachfront_seat_name
+    WHERE (advertiser = 'Bidswitch'
+           OR (advertiser = 'The Trade Desk'
+               AND (seat_name LIKE '%WMT%' OR seat_name LIKE '%Walmart%')))
+      AND seat_id <> seat_name
+),
+
+-- Beachfront reports country NAMES ('United States'); adex and the STX branch
+-- use ISO-2. mapping_region.country_name is lowercase, hence the lower() join.
+-- Resolves 99.999% of Beachfront revenue; the remainder falls back to 'ZZ'.
+country_map AS (
+    SELECT country_name, max(country) AS iso
+    FROM st_datalakehouse.analytics.mapping_region
+    WHERE country_name IS NOT NULL
+    GROUP BY 1
 ),
 
 consolidated_raw AS (
+    -- ---------- STX branch, modern: O&O SSP responses (from 2025-06-01) ----------
     SELECT
         CAST(r.date AS date) AS date,
         COALESCE(seed.direct_dsp_name, b.dsp_group_name, b.dsp_name) AS raw_dsp,
         -- Seedtag curators on O&O curation deals, identified by deal_name.
-        -- Labels match the clearvu_account values already emitted by the BFM
-        -- branch so each curator stays a single account. Gated on Curation
-        -- product_type so unrelated deal names can't leak in.
+        -- Labels match the clearvu_account values emitted by the BFM branch so
+        -- each curator stays a single account. Gated on Curation product_type
+        -- so unrelated deal names can't leak in.
         CASE
             WHEN r.product_type LIKE 'Curation%' AND lower(r.deal_name) LIKE '%multilocal%' THEN 'MultiLocal'
             WHEN r.product_type LIKE 'Curation%' AND lower(r.deal_name) LIKE '%mavern%' THEN 'Mavern Media'
@@ -127,6 +138,7 @@ consolidated_raw AS (
                 THEN 'Direct'
             ELSE COALESCE(seed.connection_type, 'Reseller')
         END AS connection_type,
+        r.inventory_type,
         SUM(r.net_imp_paid) / 1000.0 AS revenue_gross,
         SUM(r.total_impressions) AS total_impressions,
         SUM(r.total_response_bids) AS total_response_bids
@@ -144,75 +156,151 @@ consolidated_raw AS (
     -- measured here (SSP responses) in this table.
     WHERE r.date >= current_date - interval '10' day   -- <<WINDOW>>
       AND r.date < current_date   -- <<WINDOW>>
-    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+      -- this source starts 2025-05-19; the legacy branch below owns everything
+      -- before 2025-06-01, so the two can never both emit a day.
+      AND r.date >= timestamp '2025-06-01 00:00:00'
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
 
     UNION ALL
 
+    -- ---------- STX branch, legacy: ssp_events_daily_simplified (before 2025-06-01) ----------
+    -- stg_ssp_responses_daily has no history before 2025-05-19, which left the
+    -- whole Seedtag side of Jan-May 2025 missing (~88% of the table). This
+    -- branch fills it from the older event table. It carries no deal_id, so
+    -- there are no curation business lines before June 2025 and business_line
+    -- comes from product_short_code alone; dsp/channel/connection are resolved
+    -- from channel_id with the era's own mapping.
     SELECT
-        date,
-        raw_dsp,
-        clearvu_account,
-        channel_id,
-        business_line,
-        publisher_country,
-        product_category,
-        connection_type,
-        SUM(revenue_gross) AS revenue_gross,
-        SUM(total_impressions) AS total_impressions,
-        SUM(total_response_bids) AS total_response_bids
+        s.date,
+        CASE
+            WHEN s.channel_id IN ('AdMixerBidswitch', 'Viant', 'NextRoll', 'StackAdapt', 'Nexxen',
+                    'TheTradeDesk', 'Opera', 'Sportradar', 'RtbHouse', 'Beeswax', 'MediaForce',
+                    'Stackadapt', 'Illumin', 'Madopi', 'Conversant', 'Deepintent', 'DeepIntent')
+                THEN s.channel_id
+            WHEN s.channel_id IN ('LoopMe', 'Adform', 'OneTag', 'AdYouLike') THEN 'DSP Not Found'
+            WHEN s.channel_id IN ('DBM', 'GDN') THEN 'DV360'
+            WHEN s.channel_id = 'AmazonBidswitch' THEN 'Amazon DSP'
+            WHEN s.channel_id = 'Outbrain' THEN 'Outbrain/Teads'
+            WHEN s.channel_id = 'StackAdaptDSP' THEN 'StackAdapt'
+            WHEN s.product_short_code LIKE 'C%' THEN 'Xandr'
+            ELSE 'DSP Not Found'
+        END AS raw_dsp,
+        CAST(NULL AS varchar) AS clearvu_account,
+        s.channel_id,
+        CASE
+            WHEN s.product_short_code LIKE 'O%' THEN 'Open Auction - Seedtag'
+            WHEN s.product_short_code LIKE 'P%' THEN 'PMP Web - O&O'
+            WHEN s.product_short_code LIKE 'C%' THEN 'Direct Web - O&O'
+        END AS business_line,
+        s.publisher_country,
+        CASE
+            WHEN s.product_short_code = 'OMV' THEN 'Online Video'
+            WHEN s.product_short_code = 'OMN' THEN 'Native'
+            ELSE 'Display'
+        END AS product_category,
+        CASE
+            WHEN s.channel_id = 'AppNexus'
+                AND (s.product_short_code LIKE 'C%' OR s.channel_id IN ('Xandr', 'MSAN')) THEN 'Direct'
+            WHEN s.channel_id IN ('Sovrn', 'Sharethrough', 'Rubicon', 'OpenX', 'Pubmatic',
+                    'AppNexus', 'ImproveDigital', 'LoopMe', 'Adform', 'OneTag', 'AdYouLike') THEN 'Reseller'
+            WHEN s.channel_id LIKE 'Smart%' THEN 'Reseller'
+            WHEN s.channel_id IN ('DBM', 'GDN', 'Sportradar', 'StackAdapt', 'NextRoll',
+                    'AdMixerBidswitch', 'Conversant', 'Madopi') THEN 'BidSwitch'
+            WHEN s.channel_id IN ('RtbHouse', 'TheTradeDesk', 'Outbrain', 'StackAdaptDSP', 'Nexxen',
+                    'Opera', 'NextRollPAAPI', 'Viant', 'Beeswax', 'Illumin', 'DeepIntent', 'Deepintent') THEN 'Direct'
+        END AS connection_type,
+        -- this source never populated inventory_type: NULL for every row of its
+        -- 2025-01-01..2025-05-31 range. Passed through rather than invented.
+        s.inventory_type,
+        SUM(s.ssp_net_imp_paid) / 1000.0 AS revenue_gross,
+        SUM(s.ssp_impressions) AS total_impressions,
+        SUM(s.ssp_bids) AS total_response_bids
+    FROM st_datalakehouse.ad_exchange.ssp_events_daily_simplified s
+    WHERE s.date >= current_date - interval '10' day   -- <<WINDOW>>
+      AND s.date < current_date   -- <<WINDOW>>
+      AND s.date < DATE '2025-06-01'
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+
+    UNION ALL
+
+    -- ---------- BFM branch: Beachfront's own operational demand ----------
+    -- Reads reporting_bfm_demand DIRECTLY (not reporting_closing_bfm_demand).
+    -- revenue_gross is Beachfront's UNADJUSTED figure: closing's `revenue` is
+    -- net of the Select fee adjustments, the pro-rated Ent Aggregator
+    -- subtraction and the audience-segment cost, and adex reports what
+    -- Beachfront reports. Every dimension closing used to supply (dsp via the
+    -- seat table, channel, country, category, connection type) is derived here
+    -- with closing's OWN logic, so nothing is lost by dropping the dependency.
+    SELECT
+        bfm.date,
+        COALESCE(m.dsp_label, bfm.raw_dsp)     AS raw_dsp,
+        bfm.clearvu_account,
+        COALESCE(m.channel_label, bfm.raw_dsp) AS channel_id,
+        bfm.business_line,
+        bfm.publisher_country,
+        bfm.product_category,
+        bfm.connection_type,
+        bfm.inventory_type,
+        SUM(bfm.revenue_gross)       AS revenue_gross,
+        SUM(bfm.total_impressions)   AS total_impressions,
+        SUM(bfm.total_response_bids) AS total_response_bids
     FROM (
         SELECT
-            a.date AS date,
-            -- mapping label first, raw name as fallback (a.dsp_group_name is
-            -- rarely NULL, so raw-first would make the mapping dead code)
-            COALESCE(bfm_m.dsp_label, a.dsp_group_name)     AS raw_dsp,
+            d.date,
             CASE
-                WHEN a.business_line = 'Select - BFM' THEN a.clearvu_account
-                ELSE NULL
-            END AS clearvu_account,
-            COALESCE(bfm_m.channel_label, a.channel_id)     AS channel_id,
+                WHEN regexp_like(s.seat_name, '^[0-9]+$') THEN s.advertiser
+                WHEN s.seat_id IS NOT NULL AND s.advertiser = 'The Trade Desk' THEN 'Walmart'
+                WHEN s.seat_id IS NOT NULL AND s.advertiser = 'Bidswitch' THEN s.seat_name
+                ELSE d.advertiser
+            END AS raw_dsp,
+            CASE WHEN d.business_line = 'Select - BFM' THEN d.clearvu_account END AS clearvu_account,
+            -- BFM-native curation lines take the deal-level curation label
             CASE
-                WHEN a.business_line = 'PMP - Seedtag' THEN 'PMP CTV - O&O'
-                -- BFM-native curation lines take the BEACHFRONT-side label only
-                -- (never 'DSP marketplace - Migrated': that label is Seedtag-side)
-                WHEN a.business_line IN ('Select - BFM', 'DSP Marketplace - BFM')
+                WHEN d.business_line = 'PMP - Seedtag' THEN 'PMP CTV - O&O'
+                WHEN d.business_line IN ('Select - BFM', 'DSP Marketplace - BFM')
                     THEN COALESCE(cbl.bl_bfm,
-                         CASE a.business_line WHEN 'Select - BFM' THEN 'Curation 3rd Party'
+                         CASE d.business_line WHEN 'Select - BFM' THEN 'Curation 3rd Party'
                                               ELSE 'DSP Marketplace' END)
-                ELSE a.business_line
+                ELSE d.business_line
             END AS business_line,
-            a.publisher_country,
-            a.product_category,
-            a.connection_type,
+            COALESCE(cm.iso, 'ZZ') AS publisher_country,
+            CASE WHEN d.media_type = 'Display' THEN 'Display' ELSE 'CTV' END AS product_category,
             CASE
-                WHEN g.gross IS NULL THEN a.revenue
-                WHEN sum(a.revenue) OVER (PARTITION BY a.date, a.deal_id, a.deal_name) <> 0
-                    THEN g.gross * a.revenue
-                         / sum(a.revenue) OVER (PARTITION BY a.date, a.deal_id, a.deal_name)
-                ELSE g.gross / count(*) OVER (PARTITION BY a.date, a.deal_id, a.deal_name)
-            END AS revenue_gross,
-            a.total_impressions,
-            a.total_response_bids
-        FROM st_datalakehouse.analytics.reporting_closing_bfm_demand a
-        LEFT JOIN bfm_map bfm_m
-            ON bfm_m.advertiser_key = a.dsp_group_name
-        LEFT JOIN curation_bl cbl ON cbl.deal_id_lc = lower(a.deal_id)
-        LEFT JOIN bfm_gross g
-            ON  g.date      = a.date
-            AND g.deal_id   = a.deal_id
-            AND g.deal_name IS NOT DISTINCT FROM a.deal_name
-        WHERE a.business_line IN ('Open Auction - BFM', 'PMP - Seedtag',
+                WHEN d.advertiser = 'PubMatic ST' THEN 'Reseller'
+                WHEN s.seat_id IS NOT NULL AND s.advertiser = 'Bidswitch' THEN 'BidSwitch'
+                ELSE 'Direct'
+            END AS connection_type,
+            -- reporting_bfm_demand has no inventory_type; Beachfront is CTV
+            -- except for its Display rows.
+            CASE WHEN d.media_type = 'Display' THEN 'Display' ELSE 'CTV' END AS inventory_type,
+            d.revenue_gross,
+            d.impressions   AS total_impressions,
+            d.outgoing_bids AS total_response_bids
+        FROM st_datalakehouse.analytics.reporting_bfm_demand d
+        LEFT JOIN seat_names s
+            ON s.seat_id = d.seat_id AND s.advertiser = d.advertiser
+        LEFT JOIN curation_bl cbl ON cbl.deal_id_lc = lower(d.deal_id)
+        LEFT JOIN country_map cm ON cm.country_name = lower(d.country)
+        WHERE d.business_line IN ('Open Auction - BFM', 'PMP - Seedtag',
                                   'Select - BFM', 'DSP Marketplace - BFM')
-          AND NOT (a.business_line = 'Open Auction - BFM'
-                   AND a.deal_name IN ('SEEDTAG DON''USE', 'Seedtag'))
-          -- Autobuying deals are NOT excluded anymore: they used to be carved
-          -- out for the external/managed branch, which this unified table no
-          -- longer has — excluding them here would drop them entirely
-          -- (decided sep-2026).
-          AND a.date >= current_date - interval '10' day   -- <<WINDOW>>
-          AND a.date < current_date   -- <<WINDOW>>
+          -- Closing's own Open Auction perimeter. COALESCE is required: a bare
+          -- IN () is NULL for a NULL advertiser and NOT(NULL) is NULL, which
+          -- WHERE would silently drop. These advertisers are exactly the
+          -- "bfm-only" keys the previous closing LEFT JOIN discarded.
+          AND NOT (d.business_line = 'Open Auction - BFM'
+                   AND COALESCE(d.advertiser, '') IN ('TrueX', 'FreeWheel', 'LowBrow Customs',
+                       'SuperAwesome', 'tankee', 'NA', 'PlayWire', 'Initiative', 'Xandr', 'sky media'))
+          -- the Seedtag-named Open Auction deals arrive via the STX branch
+          AND NOT (d.business_line = 'Open Auction - BFM'
+                   AND d.ad_name IN ('SEEDTAG DON''USE', 'Seedtag'))
+          -- Autobuying deals are NOT excluded: they used to be carved out for
+          -- the external/managed branch, which this unified table no longer
+          -- has, so excluding them here would drop them entirely.
+          AND d.date >= current_date - interval '10' day   -- <<WINDOW>>
+          AND d.date < current_date   -- <<WINDOW>>
     ) bfm
-    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+    LEFT JOIN bfm_map m ON m.advertiser_key = bfm.raw_dsp
+    GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
 )
 
 SELECT
@@ -227,6 +315,7 @@ SELECT
     publisher_country,
     clearvu_account,
     channel_id,
+    inventory_type,
     SUM(revenue_gross) AS revenue_gross,
     SUM(total_impressions) AS total_impressions,
     SUM(total_response_bids) AS total_response_bids
@@ -237,10 +326,8 @@ FROM (
         business_line,
         publisher_country,
         product_category,
-        -- raw_dsp cleanup: junk buyer names → 'DSP Not Found', plus the
-        -- canonical renames. This is also where raw_dsp becomes dsp_group_name
-        -- (your draft referenced dsp_group_name here, which doesn't exist in
-        -- consolidated_raw).
+        -- raw_dsp cleanup: junk buyer names -> 'DSP Not Found', plus the
+        -- canonical renames. This is also where raw_dsp becomes dsp_group_name.
         CASE
             WHEN raw_dsp IS NULL OR raw_dsp IN ('', 'Null', '191919', 'ABC Mouse') OR raw_dsp LIKE '%_TV1' OR raw_dsp LIKE 'McDonald%'
                 OR raw_dsp LIKE 'Wavemaker%' OR raw_dsp LIKE 'at&amp%' OR raw_dsp LIKE 'Alexandria%'
@@ -266,9 +353,10 @@ FROM (
             WHEN channel_id = 'Deepintent' THEN 'DeepIntent'
             ELSE channel_id
         END AS channel_id,
+        inventory_type,
         revenue_gross,
         total_impressions,
         total_response_bids
     FROM consolidated_raw
 )
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
